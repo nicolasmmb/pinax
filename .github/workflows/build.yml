@@ -2,23 +2,91 @@ name: Build
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Versão explícita (ex.: v0.2.0). Vazio = incremento automático do patch."
+        required: false
+        type: string
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
 
 permissions:
   contents: write
 
 concurrency:
-  group: build-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   GOFLAGS: -mod=readonly
 
 jobs:
+  version:
+    name: Determine version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.version.outputs.commit }}
+      build_date: ${{ steps.version.outputs.build_date }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          head_tag="$(git tag --points-at HEAD --list 'v[0-9]*' --sort=-v:refname | head -n1)"
+
+          if [ -n "${INPUT_VERSION}" ]; then
+            version="${INPUT_VERSION#v}"
+          elif [ -n "${head_tag}" ]; then
+            # Reexecução do mesmo commit: reaproveita a tag já criada.
+            version="${head_tag#v}"
+          else
+            latest="$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n1)"
+            if [ -z "${latest}" ]; then
+              version="0.1.0"
+            else
+              base="${latest#v}"
+              base="${base%%-*}"
+              IFS=. read -r major minor patch <<< "${base}"
+              case "${major}${minor}${patch}" in
+                '' | *[!0-9]*)
+                  echo "tag semver inválida: ${latest}" >&2
+                  exit 1
+                  ;;
+              esac
+              major=$((10#${major}))
+              minor=$((10#${minor}))
+              patch=$((10#${patch} + 1))
+              version="${major}.${minor}.${patch}"
+            fi
+          fi
+
+          version="${version#v}"
+          if ! printf '%s' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "versão inválida: ${version}" >&2
+            exit 1
+          fi
+
+          commit="$(git rev-parse --short=12 HEAD)"
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          echo "version=v${version}" >> "${GITHUB_OUTPUT}"
+          echo "commit=${commit}" >> "${GITHUB_OUTPUT}"
+          echo "build_date=${build_date}" >> "${GITHUB_OUTPUT}"
+          echo "versão: v${version} (commit ${commit})"
+
   build:
     name: ${{ matrix.name }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -120,19 +188,12 @@ jobs:
 
       - name: Build
         shell: bash
+        env:
+          BUILD_VERSION: ${{ needs.version.outputs.version }}
+          BUILD_COMMIT: ${{ needs.version.outputs.commit }}
+          BUILD_DATE: ${{ needs.version.outputs.build_date }}
         run: |
           set -euo pipefail
-
-          case "${GITHUB_REF}" in
-            refs/tags/*)
-              BUILD_VERSION="${GITHUB_REF_NAME}"
-              ;;
-            *)
-              BUILD_VERSION="dev-$(git rev-parse --short HEAD)"
-              ;;
-          esac
-          BUILD_COMMIT="$(git rev-parse --short=12 HEAD)"
-          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           mkdir -p dist
           go build -trimpath \
@@ -141,6 +202,8 @@ jobs:
 
       - name: Smoke test
         shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -159,15 +222,7 @@ jobs:
 
           version_output="$("./${output}" --version)"
           echo "${version_output}"
-          case "${GITHUB_REF}" in
-            refs/tags/*)
-              expected="${GITHUB_REF_NAME}"
-              ;;
-            *)
-              expected="dev-"
-              ;;
-          esac
-          echo "${version_output}" | grep -q "pinax ${expected}"
+          echo "${version_output}" | grep -Fq "pinax ${EXPECTED_VERSION}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -178,8 +233,10 @@ jobs:
 
   release:
     name: Publish release
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    if: github.ref == 'refs/heads/main'
+    needs:
+      - version
+      - build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -187,14 +244,22 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: List release assets
-        run: ls -lh dist
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/pinax-linux-x64
-            dist/pinax-macos-arm64
-            dist/pinax-windows-x64.exe
-          fail_on_unmatched_files: true
-          generate_release_notes: true
+          ls -lh dist
+
+          if gh release view "${VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "release ${VERSION} já existe; atualizando assets"
+            gh release upload "${VERSION}" dist/* --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${VERSION}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "${VERSION}" \
+              --generate-notes
+          fi
