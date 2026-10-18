@@ -63,7 +63,7 @@ func testRuntime(t *testing.T) Runtime {
 		ChunkerVersion: version,
 		ChunkSize:      size,
 		ChunkOverlap:   overlap,
-	}, jobs.ServiceOptions{})
+	})
 	return Runtime{
 		Config: config.Config{
 			DocumentRoot:    root,

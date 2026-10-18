@@ -21,7 +21,7 @@ type embedder interface {
 	EmbedQuery(context.Context, string) ([]float32, error)
 }
 
-func newRuntime(ctx context.Context, cfg config.Config) (Runtime, func(), error) {
+func newWorkerRuntime(ctx context.Context, cfg config.Config) (Runtime, func(), error) {
 	embeddings, err := newEmbedder(cfg)
 	if err != nil {
 		return Runtime{}, nil, err
@@ -41,14 +41,12 @@ func newRuntime(ctx context.Context, cfg config.Config) (Runtime, func(), error)
 	}
 	ingestor.SetEmbedBatchSize(cfg.EmbedBatchSize)
 	version, size, overlap := ingestor.Chunker()
-	heartbeat := cfg.WorkerHeartbeat
-	leaseTTL := max(6*heartbeat, 30*time.Second)
 	jobService := jobs.NewService(store, ingestor, jobs.SnapshotConfig{
 		EmbeddingModel: ingestor.Model(),
 		ChunkerVersion: version,
 		ChunkSize:      size,
 		ChunkOverlap:   overlap,
-	}, jobs.ServiceOptions{LeaseTTL: leaseTTL, StaleAfter: leaseTTL})
+	})
 	return Runtime{
 		Config: cfg,
 		Ingest: ingestor,
@@ -56,6 +54,22 @@ func newRuntime(ctx context.Context, cfg config.Config) (Runtime, func(), error)
 		Jobs:   jobService,
 		Store:  store,
 	}, func() { _ = store.Close() }, nil
+}
+
+func newServeRuntime(cfg config.Config) (Runtime, func(), error) {
+	embeddings, err := newEmbedder(cfg)
+	if err != nil {
+		return Runtime{}, nil, err
+	}
+	validator, err := ingest.NewValidator(cfg.DocumentRoot, []ingest.Extractor{files.Markdown{}, files.PDF{}})
+	if err != nil {
+		return Runtime{}, nil, err
+	}
+	return Runtime{
+		Config:    cfg,
+		Embedder:  embeddings,
+		Validator: validator,
+	}, func() {}, nil
 }
 
 func newEmbedder(cfg config.Config) (embedder, error) {

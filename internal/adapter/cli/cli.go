@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/nicolasmmb/pinax/internal/adapter/ipc"
 	mcpadapter "github.com/nicolasmmb/pinax/internal/adapter/mcp"
 	"github.com/nicolasmmb/pinax/internal/adapter/turso"
 	"github.com/nicolasmmb/pinax/internal/app/ingest"
@@ -22,11 +23,13 @@ import (
 )
 
 type Runtime struct {
-	Config config.Config
-	Ingest *ingest.Service
-	Query  *query.Service
-	Jobs   *jobs.Service
-	Store  *turso.Store
+	Config    config.Config
+	Ingest    *ingest.Service
+	Query     *query.Service
+	Jobs      *jobs.Service
+	Store     *turso.Store
+	Embedder  embedder
+	Validator *ingest.Validator
 }
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer, runtime Runtime) error {
@@ -39,11 +42,29 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, runtime R
 		if len(args) != 1 {
 			return usage(stderr)
 		}
+		socketPath := ipc.SocketPath(runtime.Config.DatabasePath)
 		if runtime.Config.WorkerAutostart {
-			stop := startWorkerSupervisor(ctx, stderr, logger)
+			stop := startWorkerSupervisor(ctx, socketPath, stderr, logger)
 			defer stop()
 		}
-		server := mcpadapter.NewServer(runtime.Jobs, runtime.Query)
+		timeout := 5 * time.Second
+		if runtime.Config.WorkerAutostart {
+			timeout = 15 * time.Second
+		}
+		client, err := ipc.DialWithRetry(ctx, socketPath, timeout)
+		if err != nil {
+			return fmt.Errorf("connect to ingest worker: %w (start `pinax worker` or enable PINAX_WORKER_AUTOSTART)", err)
+		}
+		defer client.Close()
+		version, size, overlap := ingest.ChunkerDefaults()
+		jobService := jobs.NewService(client, runtime.Validator, jobs.SnapshotConfig{
+			EmbeddingModel: runtime.Embedder.Model(),
+			ChunkerVersion: version,
+			ChunkSize:      size,
+			ChunkOverlap:   overlap,
+		})
+		queryService := query.New(runtime.Embedder, client)
+		server := mcpadapter.NewServer(jobService, queryService)
 		return server.Run(ctx, &mcp.StdioTransport{})
 	case "worker":
 		flags := flag.NewFlagSet("worker", flag.ContinueOnError)
@@ -62,6 +83,14 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, runtime R
 }
 
 func runWorker(ctx context.Context, runtime Runtime, once bool, logger *slog.Logger) error {
+	ipcServer, err := ipc.Listen(ipc.SocketPath(runtime.Config.DatabasePath), runtime.Store, runtime.Store, logger)
+	if err != nil {
+		return err
+	}
+	defer ipcServer.Close()
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- ipcServer.Serve(ctx) }()
+
 	heartbeat := runtime.Config.WorkerHeartbeat
 	leaseTTL := max(6*heartbeat, 30*time.Second)
 	worker, err := jobs.NewWorker(runtime.Store, runtime.Ingest, jobs.WorkerConfig{
@@ -112,7 +141,15 @@ func Main() int {
 	if err != nil {
 		return reportError(os.Stderr, err)
 	}
-	runtime, closeRuntime, err := newRuntime(ctx, cfg)
+	var (
+		runtime      Runtime
+		closeRuntime func()
+	)
+	if os.Args[1] == "worker" {
+		runtime, closeRuntime, err = newWorkerRuntime(ctx, cfg)
+	} else {
+		runtime, closeRuntime, err = newServeRuntime(cfg)
+	}
 	if err != nil {
 		return reportError(os.Stderr, err)
 	}

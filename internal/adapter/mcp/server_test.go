@@ -59,7 +59,7 @@ func TestIndexPathIsAsyncAndStatusReportsJob(t *testing.T) {
 		ChunkerVersion: "rune-window-v2",
 		ChunkSize:      1200,
 		ChunkOverlap:   150,
-	}, jobs.ServiceOptions{})
+	})
 	server := NewServer(jobService, query.New(testEmbedder{}, testRepository{}))
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1"}, nil)
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()

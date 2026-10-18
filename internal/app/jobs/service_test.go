@@ -28,7 +28,7 @@ func TestServiceEnqueueStatusCancel(t *testing.T) {
 		ChunkerVersion: "rune-window-v2",
 		ChunkSize:      1200,
 		ChunkOverlap:   150,
-	}, jobs.ServiceOptions{})
+	})
 
 	job, deduplicated, err := service.Enqueue(ctx, "/docs")
 	if err != nil || deduplicated {
@@ -91,7 +91,7 @@ func TestServiceWorkerOnline(t *testing.T) {
 		ChunkerVersion: "rune-window-v2",
 		ChunkSize:      1200,
 		ChunkOverlap:   150,
-	}, jobs.ServiceOptions{})
+	})
 	now := time.Now().UTC()
 	lease := domain.WorkerLease{Name: "ingest", WorkerID: "worker", PID: 42, Hostname: "host", StartedAt: now, HeartbeatAt: now}
 	if acquired, err := store.AcquireLease(ctx, lease, 30*time.Second); err != nil || !acquired {

@@ -4,13 +4,14 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"syscall"
 	"time"
 )
 
-func startWorkerSupervisor(ctx context.Context, stderr io.Writer, logger *slog.Logger) func() {
+func startWorkerSupervisor(ctx context.Context, socketPath string, stderr io.Writer, logger *slog.Logger) func() {
 	childCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	executable, execErr := os.Executable()
@@ -24,6 +25,11 @@ func startWorkerSupervisor(ctx context.Context, stderr io.Writer, logger *slog.L
 		backoff := time.Second
 		for {
 			if childCtx.Err() != nil {
+				return
+			}
+			if conn, err := net.Dial("unix", socketPath); err == nil {
+				_ = conn.Close()
+				logger.Info("ingest worker already running, not starting another")
 				return
 			}
 			started := time.Now()

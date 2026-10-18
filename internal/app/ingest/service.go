@@ -100,6 +100,35 @@ func (s *Service) Chunker() (string, int, int) {
 	return s.chunkerVersion, s.chunkSize, s.chunkOverlap
 }
 
+// ChunkerDefaults returns the chunker configuration used by new services.
+func ChunkerDefaults() (string, int, int) {
+	return defaultChunkerVersion, defaultChunkSize, defaultChunkOverlap
+}
+
+type Validator struct {
+	root       string
+	extractors []Extractor
+}
+
+func NewValidator(root string, extractors []Extractor) (*Validator, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve document root: %w", err)
+	}
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		return nil, fmt.Errorf("create document root: %w", err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve document root: %w", err)
+	}
+	return &Validator{root: filepath.Clean(root), extractors: extractors}, nil
+}
+
+func (v *Validator) ResolveInput(inputPath string) (string, domain.InputKind, error) {
+	return resolveInput(v.root, v.extractors, inputPath)
+}
+
 func (s *Service) SetEmbedBatchSize(size int) {
 	if size > 0 {
 		s.embedBatchSize = size
@@ -107,6 +136,10 @@ func (s *Service) SetEmbedBatchSize(size int) {
 }
 
 func (s *Service) ResolveInput(inputPath string) (string, domain.InputKind, error) {
+	return resolveInput(s.root, s.extractors, inputPath)
+}
+
+func resolveInput(root string, extractors []Extractor, inputPath string) (string, domain.InputKind, error) {
 	path, err := filepath.Abs(inputPath)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve path: %w", err)
@@ -115,7 +148,7 @@ func (s *Service) ResolveInput(inputPath string) (string, domain.InputKind, erro
 	if err != nil {
 		return "", "", fmt.Errorf("resolve path: %w", err)
 	}
-	if !within(s.root, path) {
+	if !within(root, path) {
 		return "", "", fmt.Errorf("path %q is outside configured document root", path)
 	}
 	info, err := os.Stat(path)
@@ -125,7 +158,7 @@ func (s *Service) ResolveInput(inputPath string) (string, domain.InputKind, erro
 	if info.IsDir() {
 		return path, domain.InputDir, nil
 	}
-	if supported(path, s.extractors) {
+	if supported(path, extractors) {
 		return path, domain.InputFile, nil
 	}
 	return "", "", fmt.Errorf("unsupported file type: %s", filepath.Ext(path))

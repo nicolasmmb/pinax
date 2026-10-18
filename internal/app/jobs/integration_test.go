@@ -71,7 +71,7 @@ func TestSearchRemainsResponsiveDuringIngestion(t *testing.T) {
 		ChunkerVersion: version,
 		ChunkSize:      size,
 		ChunkOverlap:   overlap,
-	}, jobs.ServiceOptions{})
+	})
 	job, _, err := jobService.Enqueue(ctx, root)
 	if err != nil {
 		t.Fatal(err)
