@@ -295,10 +295,10 @@ func (w *Worker) addJob(ctx context.Context, job *domain.Job) {
 		w.finalizeIfDone(context.Background(), state)
 		return
 	}
-	w.startPlanning(ctx, job)
+	w.startPlanning(job)
 }
 
-func (w *Worker) startPlanning(ctx context.Context, job *domain.Job) {
+func (w *Worker) startPlanning(job *domain.Job) {
 	state := w.jobs[job.ID]
 	w.planners.Add(1)
 	go func() {
