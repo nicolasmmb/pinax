@@ -88,8 +88,10 @@ func runWorker(ctx context.Context, runtime Runtime, once bool, logger *slog.Log
 		return err
 	}
 	defer ipcServer.Close()
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	defer workerCancel()
 	serverErr := make(chan error, 1)
-	go func() { serverErr <- ipcServer.Serve(ctx) }()
+	go func() { serverErr <- ipcServer.Serve(workerCtx) }()
 
 	heartbeat := runtime.Config.WorkerHeartbeat
 	leaseTTL := max(6*heartbeat, 30*time.Second)
@@ -106,7 +108,17 @@ func runWorker(ctx context.Context, runtime Runtime, once bool, logger *slog.Log
 	if err != nil {
 		return err
 	}
-	return worker.Run(ctx)
+	workerDone := make(chan error, 1)
+	go func() { workerDone <- worker.Run(workerCtx) }()
+	select {
+	case err := <-workerDone:
+		workerCancel()
+		return err
+	case err := <-serverErr:
+		workerCancel()
+		<-workerDone
+		return err
+	}
 }
 
 func newLogger(stderr io.Writer, level string) *slog.Logger {
