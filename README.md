@@ -75,6 +75,16 @@ Para drenar a fila e sair (útil em cron ou scripts):
 bin/pinax worker --once
 ```
 
+Para acompanhar os jobs pelo terminal, com o worker em execução:
+
+```sh
+bin/pinax status            # jobs recentes
+bin/pinax status <job_id>   # detalhe de um job
+bin/pinax status --watch    # atualiza a cada segundo
+```
+
+O `status` consulta o worker pelo socket e mostra worker, progresso, arquivos em execução e falhas.
+
 O worker processa `.md` e `.pdf` recursivamente dentro de `PINAX_DOCUMENT_ROOT`. Arquivos inalterados são ignorados. PDFs sem texto extraível ficam pendentes de OCR, que não faz parte desta versão. O banco é criado automaticamente.
 
 ### Registro no cliente MCP

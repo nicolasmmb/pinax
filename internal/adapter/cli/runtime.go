@@ -56,6 +56,10 @@ func newWorkerRuntime(ctx context.Context, cfg config.Config) (Runtime, func(), 
 	}, func() { _ = store.Close() }, nil
 }
 
+func newStatusRuntime(cfg config.Config) (Runtime, func(), error) {
+	return Runtime{Config: cfg}, func() {}, nil
+}
+
 func newServeRuntime(cfg config.Config) (Runtime, func(), error) {
 	embeddings, err := newEmbedder(cfg)
 	if err != nil {

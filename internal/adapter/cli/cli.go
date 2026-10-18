@@ -77,6 +77,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, runtime R
 			return usage(stderr)
 		}
 		return runWorker(ctx, runtime, *once, logger)
+	case "status":
+		return runStatus(ctx, args[1:], stdout, stderr, runtime)
 	default:
 		return usage(stderr)
 	}
@@ -144,7 +146,7 @@ func Main() int {
 		return 2
 	}
 	switch os.Args[1] {
-	case "serve", "worker":
+	case "serve", "worker", "status":
 	default:
 		_ = usage(os.Stderr)
 		return 2
@@ -157,9 +159,12 @@ func Main() int {
 		runtime      Runtime
 		closeRuntime func()
 	)
-	if os.Args[1] == "worker" {
+	switch os.Args[1] {
+	case "worker":
 		runtime, closeRuntime, err = newWorkerRuntime(ctx, cfg)
-	} else {
+	case "status":
+		runtime, closeRuntime, err = newStatusRuntime(cfg)
+	default:
 		runtime, closeRuntime, err = newServeRuntime(cfg)
 	}
 	if err != nil {
@@ -179,6 +184,6 @@ func reportError(stderr io.Writer, err error) int {
 }
 
 func usage(stderr io.Writer) error {
-	fmt.Fprintln(stderr, "usage: pinax serve | pinax worker [--once]")
+	fmt.Fprintln(stderr, "usage: pinax serve | pinax worker [--once] | pinax status [job_id] [--watch]")
 	return fmt.Errorf("invalid command")
 }

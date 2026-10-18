@@ -3,11 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/nicolasmmb/pinax/internal/adapter/ipc"
 	"github.com/nicolasmmb/pinax/internal/adapter/turso"
 	"github.com/nicolasmmb/pinax/internal/app/ingest"
 	"github.com/nicolasmmb/pinax/internal/app/jobs"
@@ -102,6 +106,82 @@ func TestWorkerCommandDrainsQueue(t *testing.T) {
 	}
 	if status.Jobs[0].Progress.Indexed != 1 {
 		t.Fatalf("progress = %#v", status.Jobs[0].Progress)
+	}
+}
+
+func TestStatusCommandPrintsJobs(t *testing.T) {
+	ctx := context.Background()
+	store, err := turso.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	job, _, err := store.EnqueueJob(ctx, domain.EnqueueRequest{
+		InputPath:      "/docs",
+		InputKind:      domain.InputDir,
+		EmbeddingModel: "model",
+		ChunkerVersion: "rune-window-v2",
+		ChunkSize:      1200,
+		ChunkOverlap:   150,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	socketPath := ipc.SocketPath(":memory:")
+	server, err := ipc.Listen(socketPath, store, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	go func() { _ = server.Serve(ctx) }()
+
+	runtime := Runtime{Config: config.Config{DatabasePath: ":memory:"}}
+	var stdout, stderr bytes.Buffer
+	if err := Run(ctx, []string{"status"}, &stdout, &stderr, runtime); err != nil {
+		t.Fatalf("status: %v\n%s", err, stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, shortID(job.ID)) || !strings.Contains(output, "queued") || !strings.Contains(output, "/docs") {
+		t.Fatalf("unexpected status output:\n%s", output)
+	}
+}
+
+func TestRenderStatusShowsActiveFilesAndFailures(t *testing.T) {
+	status := domain.StatusResult{
+		Worker: domain.WorkerStatus{
+			WorkerLease: domain.WorkerLease{
+				WorkerID:    "worker-1",
+				PID:         42,
+				HeartbeatAt: time.Now(),
+			},
+			Online: true,
+		},
+		Jobs: []domain.JobSnapshot{{
+			Job: domain.Job{
+				ID:        "abcdef1234567890",
+				InputPath: "/docs",
+				Status:    domain.JobRunning,
+			},
+			Progress: domain.JobProgress{FilesTotal: 2, FilesDone: 1, Percent: 50, Chunks: 10},
+			ActiveFiles: []domain.JobFile{{
+				Path:   "/docs/a.pdf",
+				Status: domain.FileRunning,
+				Stage:  domain.StageEmbedding,
+				Chunks: 7,
+			}},
+			Failures: []domain.JobFile{{
+				Path:  "/docs/b.pdf",
+				Error: "broken",
+			}},
+		}},
+	}
+	var output bytes.Buffer
+	renderStatus(&output, status)
+	text := output.String()
+	for _, want := range []string{"worker: online=true", "abcdef123456", "running", "embedding", "/docs/a.pdf", "broken"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status output missing %q:\n%s", want, text)
+		}
 	}
 }
 
