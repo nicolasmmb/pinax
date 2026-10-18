@@ -15,7 +15,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/nicolasmmb/pinax/internal/adapter/ipc"
 	mcpadapter "github.com/nicolasmmb/pinax/internal/adapter/mcp"
-	"github.com/nicolasmmb/pinax/internal/app/ingest"
 	"github.com/nicolasmmb/pinax/internal/app/jobs"
 	"github.com/nicolasmmb/pinax/internal/app/query"
 	"github.com/nicolasmmb/pinax/internal/config"
@@ -25,6 +24,7 @@ type command struct {
 	name       string
 	once       bool
 	statusArgs []string
+	indexPath  string
 }
 
 func parseCommand(args []string, stderr io.Writer) (command, error) {
@@ -50,6 +50,11 @@ func parseCommand(args []string, stderr io.Writer) (command, error) {
 		return command{name: "worker", once: *once}, nil
 	case "status":
 		return command{name: "status", statusArgs: args[1:]}, nil
+	case "index":
+		if len(args) != 2 {
+			return command{}, usage(stderr)
+		}
+		return command{name: "index", indexPath: args[1]}, nil
 	default:
 		return command{}, usage(stderr)
 	}
@@ -71,13 +76,7 @@ func runServe(ctx context.Context, deps serveDeps, stderr io.Writer) error {
 		return fmt.Errorf("connect to ingest worker: %w (start `pinax worker` or enable PINAX_WORKER_AUTOSTART)", err)
 	}
 	defer client.Close()
-	version, size, overlap := ingest.ChunkerDefaults()
-	jobService := jobs.NewService(client, deps.Validator, jobs.SnapshotConfig{
-		EmbeddingModel: deps.Embedder.Model(),
-		ChunkerVersion: version,
-		ChunkSize:      size,
-		ChunkOverlap:   overlap,
-	})
+	jobService := jobs.NewService(client, deps.Validator, jobSnapshot(deps.Embedder.Model()))
 	queryService := query.New(deps.Embedder, client)
 	server := mcpadapter.NewServer(jobService, queryService)
 	return server.Run(ctx, &mcp.StdioTransport{})
@@ -163,6 +162,15 @@ func Main() int {
 		if err != nil {
 			return reportError(os.Stderr, err)
 		}
+	case "index":
+		deps, err := newServeDeps(cfg)
+		if err != nil {
+			return reportError(os.Stderr, err)
+		}
+		err = runIndex(ctx, deps, cmd.indexPath, os.Stdout)
+		if err != nil {
+			return reportError(os.Stderr, err)
+		}
 	default:
 		deps, err := newServeDeps(cfg)
 		if err != nil {
@@ -182,6 +190,6 @@ func reportError(stderr io.Writer, err error) int {
 }
 
 func usage(stderr io.Writer) error {
-	fmt.Fprintln(stderr, "usage: pinax serve | pinax worker [--once] | pinax status [job_id] [--watch]")
+	fmt.Fprintln(stderr, "usage: pinax serve | pinax worker [--once] | pinax status [job_id] [--watch] | pinax index <path>")
 	return fmt.Errorf("invalid command")
 }

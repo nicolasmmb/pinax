@@ -189,6 +189,9 @@ func TestParseCommand(t *testing.T) {
 		{name: "worker once", args: []string{"worker", "--once"}, want: "worker"},
 		{name: "status", args: []string{"status"}, want: "status"},
 		{name: "status job", args: []string{"status", "abc"}, want: "status"},
+		{name: "index", args: []string{"index", "/docs"}, want: "index"},
+		{name: "index missing path", args: []string{"index"}, wantErr: true},
+		{name: "index extra", args: []string{"index", "/docs", "extra"}, wantErr: true},
 		{name: "missing", args: nil, wantErr: true},
 		{name: "unknown", args: []string{"bogus"}, wantErr: true},
 		{name: "serve extra", args: []string{"serve", "x"}, wantErr: true},
@@ -224,5 +227,130 @@ func TestParseWorkerOnce(t *testing.T) {
 	}
 	if !cmd.once {
 		t.Fatal("expected --once to be set")
+	}
+}
+
+func testIndexEnv(t *testing.T) (serveDeps, *turso.Store) {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "notes.md"), []byte("conteudo de teste"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := turso.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	cfg := config.Config{
+		DocumentRoot:  root,
+		DatabasePath:  filepath.Join(root, "db"),
+		EmbedProvider: config.EmbedProviderOllama,
+		EmbedModel:    "test-model",
+	}
+	deps, err := newServeDeps(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := ipc.Listen(ipc.SocketPath(cfg.DatabasePath), store, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	go func() { _ = server.Serve(context.Background()) }()
+	return deps, store
+}
+
+func TestIndexCommandEnqueues(t *testing.T) {
+	ctx := context.Background()
+	deps, store := testIndexEnv(t)
+	path := filepath.Join(deps.Config.DocumentRoot, "notes.md")
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	if err := runIndex(ctx, deps, path, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	output := stdout.String()
+	for _, want := range []string{"job=", "status=queued", "deduplicated=false", "path=" + resolved} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+	list, err := store.ListJobs(ctx, 10)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("jobs = %#v, %v", list, err)
+	}
+	if list[0].InputPath != resolved || list[0].InputKind != domain.InputFile {
+		t.Fatalf("unexpected job: %#v", list[0])
+	}
+
+	stdout.Reset()
+	if err := runIndex(ctx, deps, path, &stdout); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "deduplicated=true") {
+		t.Fatalf("expected deduplicated job:\n%s", stdout.String())
+	}
+	list, err = store.ListJobs(ctx, 10)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("duplicate job created: %#v, %v", list, err)
+	}
+}
+
+func TestIndexCommandDirectory(t *testing.T) {
+	ctx := context.Background()
+	deps, store := testIndexEnv(t)
+	dir := filepath.Join(deps.Config.DocumentRoot, "sub")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte("a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runIndex(ctx, deps, dir, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	list, err := store.ListJobs(ctx, 10)
+	if err != nil || len(list) != 1 || list[0].InputKind != domain.InputDir {
+		t.Fatalf("jobs = %#v, %v", list, err)
+	}
+}
+
+func TestIndexCommandRejectsOutsideRoot(t *testing.T) {
+	deps, _ := testIndexEnv(t)
+	outside := filepath.Join(t.TempDir(), "outside.md")
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runIndex(context.Background(), deps, outside, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "outside configured document root") {
+		t.Fatalf("expected root validation error, got %v", err)
+	}
+}
+
+func TestIndexCommandWorkerOffline(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "notes.md")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deps, err := newServeDeps(config.Config{
+		DocumentRoot:  root,
+		DatabasePath:  filepath.Join(root, "missing"),
+		EmbedProvider: config.EmbedProviderOllama,
+		EmbedModel:    "test-model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	err = runIndex(ctx, deps, path, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "worker offline") {
+		t.Fatalf("expected offline error, got %v", err)
 	}
 }

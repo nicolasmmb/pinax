@@ -84,6 +84,15 @@ bin/pinax status --watch    # atualiza a cada segundo
 
 O `status` consulta o worker pelo socket e mostra worker, progresso, arquivos em execução e falhas.
 
+Para enfileirar sem um cliente MCP, com o worker em execução:
+
+```sh
+bin/pinax index documents/contratos
+bin/pinax index documents/contratos/edital.pdf
+```
+
+O comando valida o caminho, enfileira e imprime `job_id`, status e se houve deduplicação. Ele não espera a indexação terminar; use `pinax status` para acompanhar. O comando não abre o banco: quem grava continua sendo o worker.
+
 O worker processa `.md` e `.pdf` recursivamente dentro de `PINAX_DOCUMENT_ROOT`. Arquivos inalterados são ignorados. PDFs sem texto extraível ficam pendentes de OCR, que não faz parte desta versão. O banco é criado automaticamente.
 
 ### Registro no cliente MCP

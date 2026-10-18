@@ -59,6 +59,20 @@ CREATE TABLE worker_heartbeat (
 
 Sem migração: apague o banco local para recriar o schema.
 
+## Comando `pinax index`
+
+```sh
+pinax index <path>
+```
+
+- Valida o caminho dentro de `PINAX_DOCUMENT_ROOT`.
+- Conecta no worker pelo socket.
+- Enfileira com o mesmo caso de uso do MCP (`jobs.Service.Enqueue`).
+- Imprime `job=<id> status=<status> deduplicated=<bool> path=<resolvido>`.
+- Não abre o banco e não espera a indexação terminar.
+
+Requer worker em execução (`pinax worker` ou `pinax serve`).
+
 ## Verificação
 
 ```sh

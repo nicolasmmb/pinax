@@ -10,6 +10,7 @@ import (
 	"github.com/nicolasmmb/pinax/internal/adapter/openai"
 	"github.com/nicolasmmb/pinax/internal/adapter/turso"
 	"github.com/nicolasmmb/pinax/internal/app/ingest"
+	"github.com/nicolasmmb/pinax/internal/app/jobs"
 	"github.com/nicolasmmb/pinax/internal/config"
 )
 
@@ -67,6 +68,16 @@ func newWorkerDeps(ctx context.Context, cfg config.Config) (workerDeps, func(), 
 	}
 	ingestor.SetEmbedBatchSize(cfg.EmbedBatchSize)
 	return workerDeps{Config: cfg, Store: store, Ingest: ingestor}, func() { _ = store.Close() }, nil
+}
+
+func jobSnapshot(model string) jobs.SnapshotConfig {
+	version, size, overlap := ingest.ChunkerDefaults()
+	return jobs.SnapshotConfig{
+		EmbeddingModel: model,
+		ChunkerVersion: version,
+		ChunkSize:      size,
+		ChunkOverlap:   overlap,
+	}
 }
 
 func newEmbedder(cfg config.Config) (embedder, error) {
