@@ -8,9 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nicolasmmb/pinax/internal/app/jobs"
 	"github.com/nicolasmmb/pinax/internal/domain"
 )
+
+var _ Control = (*Client)(nil)
 
 type Client struct {
 	path string
@@ -109,10 +110,10 @@ func (c *Client) call(ctx context.Context, method string, args, reply any) error
 func mapServerError(err rpc.ServerError) error {
 	message := err.Error()
 	switch message {
-	case jobs.ErrJobNotFound.Error():
-		return jobs.ErrJobNotFound
-	case jobs.ErrJobNotOwned.Error():
-		return jobs.ErrJobNotOwned
+	case domain.ErrJobNotFound.Error():
+		return domain.ErrJobNotFound
+	case domain.ErrJobNotOwned.Error():
+		return domain.ErrJobNotOwned
 	default:
 		return errors.New(message)
 	}

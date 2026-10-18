@@ -18,19 +18,19 @@ type InputResolver interface {
 	ResolveInput(path string) (string, domain.InputKind, error)
 }
 
-type ControlRepository interface {
+type Control interface {
 	EnqueueJob(context.Context, domain.EnqueueRequest) (domain.Job, bool, error)
 	Status(context.Context, string, int) (domain.StatusResult, error)
 	Cancel(context.Context, string) (domain.JobSnapshot, error)
 }
 
 type Service struct {
-	repository ControlRepository
+	repository Control
 	resolver   InputResolver
 	snapshot   SnapshotConfig
 }
 
-func NewService(repository ControlRepository, resolver InputResolver, snapshot SnapshotConfig) *Service {
+func NewService(repository Control, resolver InputResolver, snapshot SnapshotConfig) *Service {
 	return &Service{
 		repository: repository,
 		resolver:   resolver,

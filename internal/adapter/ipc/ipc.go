@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/nicolasmmb/pinax/internal/app/jobs"
 	"github.com/nicolasmmb/pinax/internal/domain"
 )
 
@@ -56,11 +57,7 @@ type SearchReply struct {
 	Results []domain.SearchResult
 }
 
-type Control interface {
-	EnqueueJob(context.Context, domain.EnqueueRequest) (domain.Job, bool, error)
-	Status(context.Context, string, int) (domain.StatusResult, error)
-	Cancel(context.Context, string) (domain.JobSnapshot, error)
-}
+type Control = jobs.Control
 
 type Searcher interface {
 	Search(context.Context, []float32, string, int) ([]domain.SearchResult, error)

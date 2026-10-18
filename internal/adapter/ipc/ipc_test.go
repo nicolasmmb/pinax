@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/nicolasmmb/pinax/internal/adapter/turso"
-	"github.com/nicolasmmb/pinax/internal/app/jobs"
 	"github.com/nicolasmmb/pinax/internal/domain"
 )
 
@@ -54,7 +53,7 @@ func TestClientServerRoundTrip(t *testing.T) {
 	if err != nil || len(status.Jobs) != 1 || status.Jobs[0].ID != job.ID {
 		t.Fatalf("status = %#v, %v", status, err)
 	}
-	if _, err := client.Status(ctx, "missing", 10); !errors.Is(err, jobs.ErrJobNotFound) {
+	if _, err := client.Status(ctx, "missing", 10); !errors.Is(err, domain.ErrJobNotFound) {
 		t.Fatalf("expected ErrJobNotFound, got %v", err)
 	}
 	canceled, err := client.Cancel(ctx, job.ID)

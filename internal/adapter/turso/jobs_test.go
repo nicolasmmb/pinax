@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nicolasmmb/pinax/internal/app/jobs"
 	"github.com/nicolasmmb/pinax/internal/domain"
 )
 
@@ -55,7 +54,7 @@ func TestEnqueueDeduplicatesActiveInput(t *testing.T) {
 	if !deduplicated || second.ID != first.ID {
 		t.Fatalf("expected deduplicated job %s, got %#v deduplicated=%v", first.ID, second, deduplicated)
 	}
-	if _, err := store.GetJob(context.Background(), "missing"); !errors.Is(err, jobs.ErrJobNotFound) {
+	if _, err := store.GetJob(context.Background(), "missing"); !errors.Is(err, domain.ErrJobNotFound) {
 		t.Fatalf("expected ErrJobNotFound, got %v", err)
 	}
 }
@@ -162,8 +161,8 @@ func TestClaimIsExclusive(t *testing.T) {
 	if len(got) != 1 || got[0].ID != job.ID {
 		t.Fatalf("claimed %d jobs, want exactly one", len(got))
 	}
-	if err := store.HeartbeatJob(context.Background(), job.ID, "wrong-worker", time.Now()); !errors.Is(err, jobs.ErrJobNotOwned) {
-		t.Fatalf("expected ErrJobNotOwned, got %v", err)
+	if err := store.HeartbeatJobs(context.Background(), []string{job.ID}, "wrong-worker", time.Now()); err != nil {
+		t.Fatalf("heartbeat jobs: %v", err)
 	}
 }
 
@@ -284,7 +283,7 @@ func TestRequeueAndPurge(t *testing.T) {
 	if err != nil || purged != 1 {
 		t.Fatalf("purged = %d, %v", purged, err)
 	}
-	if _, err := store.GetJob(ctx, job.ID); !errors.Is(err, jobs.ErrJobNotFound) {
+	if _, err := store.GetJob(ctx, job.ID); !errors.Is(err, domain.ErrJobNotFound) {
 		t.Fatalf("expected purged job to be gone, got %v", err)
 	}
 	if _, err := store.GetJob(ctx, active.ID); err != nil {

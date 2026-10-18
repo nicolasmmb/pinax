@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nicolasmmb/pinax/internal/app/jobs"
 	"github.com/nicolasmmb/pinax/internal/domain"
 )
 
@@ -170,7 +169,7 @@ func (s *Store) GetJob(ctx context.Context, id string) (domain.Job, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+jobColumns+` FROM ingest_jobs WHERE id = ?`, id)
 	job, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.Job{}, jobs.ErrJobNotFound
+		return domain.Job{}, domain.ErrJobNotFound
 	}
 	if err != nil {
 		return domain.Job{}, fmt.Errorf("get job: %w", err)
@@ -536,7 +535,7 @@ WHERE id = ? AND worker_id = ? AND status = 'running'`, formatTime(now), id, wor
 		return err
 	}
 	if affected != 1 {
-		return jobs.ErrJobNotOwned
+		return domain.ErrJobNotOwned
 	}
 	return nil
 }
@@ -618,7 +617,7 @@ func (s *Store) FinalizeJob(ctx context.Context, id string) (domain.Job, bool, e
 	row := tx.QueryRowContext(ctx, `SELECT `+jobColumns+` FROM ingest_jobs WHERE id = ?`, id)
 	job, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.Job{}, false, jobs.ErrJobNotFound
+		return domain.Job{}, false, domain.ErrJobNotFound
 	}
 	if err != nil {
 		return domain.Job{}, false, err
@@ -684,7 +683,7 @@ func (s *Store) RequestCancel(ctx context.Context, id string) (domain.Job, error
 	row := tx.QueryRowContext(ctx, `SELECT `+jobColumns+` FROM ingest_jobs WHERE id = ?`, id)
 	job, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.Job{}, jobs.ErrJobNotFound
+		return domain.Job{}, domain.ErrJobNotFound
 	}
 	if err != nil {
 		return domain.Job{}, err
@@ -724,7 +723,7 @@ func (s *Store) CancelRequested(ctx context.Context, id string) (bool, error) {
 	var requested int
 	err := s.db.QueryRowContext(ctx, `SELECT cancel_requested FROM ingest_jobs WHERE id = ?`, id).Scan(&requested)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, jobs.ErrJobNotFound
+		return false, domain.ErrJobNotFound
 	}
 	if err != nil {
 		return false, fmt.Errorf("cancel requested: %w", err)

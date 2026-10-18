@@ -2,25 +2,14 @@ package jobs
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/nicolasmmb/pinax/internal/app/ingest"
 	"github.com/nicolasmmb/pinax/internal/domain"
 )
 
-var (
-	ErrJobNotFound = errors.New("job not found")
-	ErrJobNotOwned = errors.New("job not owned by this worker")
-)
-
-type Repository interface {
-	EnqueueJob(context.Context, domain.EnqueueRequest) (domain.Job, bool, error)
-	GetJob(context.Context, string) (domain.Job, error)
-	ListJobs(context.Context, int) ([]domain.Job, error)
-	JobProgress(context.Context, string) (domain.JobProgress, error)
-	ActiveFiles(context.Context, string) ([]domain.JobFile, error)
-	Failures(context.Context, string, int) ([]domain.JobFile, int, error)
+// WorkerStore is the persistence port used by the ingestion worker.
+type WorkerStore interface {
 	QueuedFiles(context.Context, string) ([]string, error)
 	PlanJobFiles(context.Context, string, []string) error
 	ResetPlanning(context.Context, string) error
@@ -36,7 +25,6 @@ type Repository interface {
 	RequeueJob(context.Context, string, string) error
 	FinalizeJob(context.Context, string) (domain.Job, bool, error)
 	FailJob(context.Context, string, string) error
-	RequestCancel(context.Context, string) (domain.Job, error)
 	CancelRequested(context.Context, string) (bool, error)
 	PurgeJobs(context.Context, time.Time) (int, error)
 	TouchWorker(context.Context, domain.WorkerInfo) error

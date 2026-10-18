@@ -62,7 +62,7 @@ type jobRuntime struct {
 }
 
 type Worker struct {
-	repo     Repository
+	repo     WorkerStore
 	ingester Ingester
 	cfg      WorkerConfig
 	log      *slog.Logger
@@ -79,7 +79,7 @@ type Worker struct {
 	outcomes chan fileOutcome
 }
 
-func NewWorker(repo Repository, ingester Ingester, cfg WorkerConfig) (*Worker, error) {
+func NewWorker(repo WorkerStore, ingester Ingester, cfg WorkerConfig) (*Worker, error) {
 	cfg = cfg.withDefaults()
 	hostname, err := os.Hostname()
 	if err != nil {
