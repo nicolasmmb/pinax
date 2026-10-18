@@ -246,6 +246,9 @@ func (s *Service) IndexFile(ctx context.Context, path string, hooks ProgressHook
 	hooks.stage(domain.StageExtracting)
 	pages, err := extractor.Extract(ctx, path)
 	if err != nil {
+		if ctx.Err() != nil {
+			return FileResult{Status: domain.FileCanceled, Err: ctx.Err()}, ctx.Err()
+		}
 		return FileResult{Status: domain.FileFailed, Err: err}, err
 	}
 	hooks.stage(domain.StageChunking)
@@ -281,6 +284,9 @@ func (s *Service) IndexFile(ctx context.Context, path string, hooks ProgressHook
 		end := min(start+s.embedBatchSize, len(texts))
 		vectors, err := s.embedder.EmbedDocuments(ctx, texts[start:end])
 		if err != nil {
+			if ctx.Err() != nil {
+				return FileResult{Status: domain.FileCanceled, Err: ctx.Err()}, ctx.Err()
+			}
 			return FileResult{Status: domain.FileFailed, Err: err}, err
 		}
 		if len(vectors) != end-start {
@@ -317,6 +323,9 @@ func (s *Service) IndexFile(ctx context.Context, path string, hooks ProgressHook
 		IndexedAt:      time.Now().UTC(),
 	}
 	if err := s.repository.ReplaceDocument(ctx, doc, chunks); err != nil {
+		if ctx.Err() != nil {
+			return FileResult{Status: domain.FileCanceled, Err: ctx.Err()}, ctx.Err()
+		}
 		return FileResult{Status: domain.FileFailed, Err: err}, err
 	}
 	return FileResult{Status: domain.FileIndexed, Chunks: len(chunks)}, nil

@@ -33,6 +33,7 @@ func newRuntime(ctx context.Context, cfg config.Config) (Runtime, func(), error)
 		_ = store.Close()
 		return Runtime{}, nil, err
 	}
+	ingestor.SetEmbedBatchSize(cfg.EmbedBatchSize)
 	return Runtime{Ingest: ingestor, Query: query.New(embeddings, store)}, func() { _ = store.Close() }, nil
 }
 
