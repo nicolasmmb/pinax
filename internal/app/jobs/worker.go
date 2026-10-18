@@ -17,8 +17,7 @@ import (
 
 type WorkerConfig struct {
 	WorkerID      string
-	Workers       int
-	JobSlots      int
+	Concurrency   int
 	Heartbeat     time.Duration
 	JobStaleAfter time.Duration
 	Retention     time.Duration
@@ -27,11 +26,8 @@ type WorkerConfig struct {
 }
 
 func (c WorkerConfig) withDefaults() WorkerConfig {
-	if c.Workers <= 0 {
-		c.Workers = 4
-	}
-	if c.JobSlots <= 0 {
-		c.JobSlots = 4
+	if c.Concurrency <= 0 {
+		c.Concurrency = 4
 	}
 	if c.Heartbeat <= 0 {
 		c.Heartbeat = 5 * time.Second
@@ -48,17 +44,27 @@ func (c WorkerConfig) withDefaults() WorkerConfig {
 type fileTask struct {
 	jobID string
 	path  string
+	ctx   context.Context
 }
 
 type fileOutcome struct {
 	jobID string
 }
 
-type jobRuntime struct {
-	job           domain.Job
-	ctx           context.Context
-	cancel        context.CancelFunc
-	cancelPending bool
+type planResult struct {
+	jobID string
+	paths []string
+	err   error
+}
+
+type jobState struct {
+	id              string
+	ctx             context.Context
+	cancel          context.CancelFunc
+	pending         []string
+	inFlight        int
+	planned         bool
+	cancelRequested bool
 }
 
 type Worker struct {
@@ -71,12 +77,19 @@ type Worker struct {
 	pid      int
 	started  time.Time
 
-	mu      sync.RWMutex
-	active  map[string]*jobRuntime
-	feeders sync.WaitGroup
+	// Owned by the scheduler goroutine.
+	jobs    map[string]*jobState
+	order   []*jobState
+	next    int
+	inFiles int
 
-	tasks    chan fileTask
-	outcomes chan fileOutcome
+	runCtx      context.Context
+	tasks       chan fileTask
+	completions chan fileOutcome
+	plans       chan planResult
+
+	runners  sync.WaitGroup
+	planners sync.WaitGroup
 }
 
 func NewWorker(repo WorkerStore, ingester Ingester, cfg WorkerConfig) (*Worker, error) {
@@ -94,17 +107,18 @@ func NewWorker(repo WorkerStore, ingester Ingester, cfg WorkerConfig) (*Worker, 
 		id = fmt.Sprintf("%s-%d-%s", hostname, os.Getpid(), hex.EncodeToString(raw[:]))
 	}
 	return &Worker{
-		repo:     repo,
-		ingester: ingester,
-		cfg:      cfg,
-		log:      cfg.Logger,
-		name:     id,
-		hostname: hostname,
-		pid:      os.Getpid(),
-		started:  time.Now().UTC(),
-		active:   make(map[string]*jobRuntime),
-		tasks:    make(chan fileTask, cfg.Workers*4),
-		outcomes: make(chan fileOutcome, cfg.Workers*4),
+		repo:        repo,
+		ingester:    ingester,
+		cfg:         cfg,
+		log:         cfg.Logger,
+		name:        id,
+		hostname:    hostname,
+		pid:         os.Getpid(),
+		started:     time.Now().UTC(),
+		jobs:        make(map[string]*jobState),
+		tasks:       make(chan fileTask, cfg.Concurrency),
+		completions: make(chan fileOutcome, cfg.Concurrency*2),
+		plans:       make(chan planResult, cfg.Concurrency),
 	}, nil
 }
 
@@ -113,11 +127,12 @@ func (w *Worker) WorkerID() string { return w.name }
 func (w *Worker) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	w.runCtx = runCtx
 
 	if err := w.touch(); err != nil {
 		return err
 	}
-	w.log.Info("worker started", "worker_id", w.name, "workers", w.cfg.Workers, "job_slots", w.cfg.JobSlots)
+	w.log.Info("worker started", "worker_id", w.name, "concurrency", w.cfg.Concurrency)
 
 	if recovered, err := w.repo.RecoverStaleJobs(runCtx, time.Now().UTC(), w.cfg.JobStaleAfter); err != nil {
 		w.log.Warn("recover stale jobs", "error", err)
@@ -130,20 +145,21 @@ func (w *Worker) Run(ctx context.Context) error {
 	background.Add(1)
 	go func() {
 		defer background.Done()
-		w.heartbeat(runCtx, cancel)
+		w.heartbeat(runCtx)
 	}()
-	for i := 0; i < w.cfg.Workers; i++ {
-		background.Add(1)
+	for i := 0; i < w.cfg.Concurrency; i++ {
+		w.runners.Add(1)
 		go func() {
-			defer background.Done()
-			w.fileWorker(runCtx)
+			defer w.runners.Done()
+			w.fileRunner(runCtx)
 		}()
 	}
 
 	err := w.schedule(runCtx)
 	cancel()
 	background.Wait()
-	w.feeders.Wait()
+	w.runners.Wait()
+	w.planners.Wait()
 	w.requeueActive()
 	clearCtx, clearCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer clearCancel()
@@ -169,7 +185,7 @@ func (w *Worker) info() domain.WorkerInfo {
 	}
 }
 
-func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc) {
+func (w *Worker) heartbeat(ctx context.Context) {
 	ticker := time.NewTicker(w.cfg.Heartbeat)
 	defer ticker.Stop()
 	for {
@@ -178,120 +194,33 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc) {
 			return
 		case <-ticker.C:
 		}
-		now := time.Now().UTC()
 		if err := w.repo.TouchWorker(ctx, w.info()); err != nil {
 			if ctx.Err() == nil {
 				w.log.Warn("touch worker heartbeat", "error", err)
 			}
 			continue
 		}
-		runtimes := w.runtimes()
-		if len(runtimes) == 0 {
+		ids, err := w.repo.ActiveJobIDs(ctx, w.name)
+		if err != nil {
+			if ctx.Err() == nil {
+				w.log.Warn("list active jobs", "error", err)
+			}
 			continue
 		}
-		ids := make([]string, 0, len(runtimes))
-		for _, rt := range runtimes {
-			ids = append(ids, rt.job.ID)
-		}
-		if err := w.repo.HeartbeatJobs(ctx, ids, w.name, now); err != nil && ctx.Err() == nil {
+		if err := w.repo.HeartbeatJobs(ctx, ids, w.name, time.Now().UTC()); err != nil && ctx.Err() == nil {
 			w.log.Warn("heartbeat jobs", "error", err)
 		}
 	}
 }
 
-func (w *Worker) fileWorker(ctx context.Context) {
+func (w *Worker) fileRunner(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case task := <-w.tasks:
-			w.processFile(ctx, task)
+			w.processFile(task)
 		}
-	}
-}
-
-func (w *Worker) processFile(runCtx context.Context, task fileTask) {
-	rt := w.runtime(task.jobID)
-	if rt == nil || rt.ctx.Err() != nil {
-		return
-	}
-	started, err := w.repo.StartJobFile(rt.ctx, task.jobID, task.path)
-	if err != nil {
-		if rt.ctx.Err() == nil {
-			w.log.Warn("start job file", "job_id", task.jobID, "path", task.path, "error", err)
-		}
-		w.reportOutcome(runCtx, task.jobID)
-		return
-	}
-	if !started {
-		w.reportOutcome(runCtx, task.jobID)
-		return
-	}
-
-	lastChunkWrite := time.Time{}
-	hooks := ingest.ProgressHooks{
-		OnStage: func(stage domain.Stage) {
-			if rt.ctx.Err() != nil {
-				return
-			}
-			if err := w.repo.SetJobFileStage(rt.ctx, task.jobID, task.path, stage); err != nil {
-				w.log.Debug("set job file stage", "job_id", task.jobID, "path", task.path, "error", err)
-			}
-		},
-		OnChunks: func(done int) {
-			if rt.ctx.Err() != nil {
-				return
-			}
-			if time.Since(lastChunkWrite) < 500*time.Millisecond {
-				return
-			}
-			lastChunkWrite = time.Now()
-			if err := w.repo.SetJobFileChunks(rt.ctx, task.jobID, task.path, done); err != nil {
-				w.log.Debug("set job file chunks", "job_id", task.jobID, "path", task.path, "error", err)
-			}
-		},
-	}
-
-	result, ingestErr := w.ingester.IndexFile(rt.ctx, task.path, hooks)
-	status := result.Status
-	chunks := result.Chunks
-	message := ""
-
-	finishCtx, finishCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer finishCancel()
-	if runCtx.Err() != nil {
-		if err := w.repo.RequeueJobFile(finishCtx, task.jobID, task.path); err != nil {
-			w.log.Warn("requeue job file", "job_id", task.jobID, "path", task.path, "error", err)
-		}
-		return
-	}
-	switch {
-	case rt.ctx.Err() != nil:
-		status = domain.FileCanceled
-	case !status.Terminal():
-		status = domain.FileFailed
-		if ingestErr != nil {
-			message = truncateError(ingestErr)
-		} else {
-			message = "index failed"
-		}
-	case status == domain.FileFailed:
-		if ingestErr != nil {
-			message = truncateError(ingestErr)
-		} else {
-			message = "index failed"
-		}
-	}
-	if err := w.repo.FinishJobFile(finishCtx, task.jobID, task.path, status, chunks, message); err != nil {
-		w.log.Warn("finish job file", "job_id", task.jobID, "path", task.path, "error", err)
-	}
-	w.reportOutcome(runCtx, task.jobID)
-}
-
-func (w *Worker) reportOutcome(ctx context.Context, jobID string) {
-	select {
-	case w.outcomes <- fileOutcome{jobID: jobID}:
-	case <-ctx.Done():
 	}
 }
 
@@ -299,51 +228,49 @@ func (w *Worker) schedule(ctx context.Context) error {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	lastPurge := time.Now()
-	w.claimJobs(ctx)
+	w.claim(ctx)
 	w.pollCancellations(ctx)
 
 	for {
+		w.dispatch()
+		if w.cfg.Once && len(w.jobs) == 0 && w.inFiles == 0 {
+			return nil
+		}
 		select {
 		case <-ctx.Done():
 			return nil
-		case outcome := <-w.outcomes:
-			w.finalizeIfDone(ctx, outcome.jobID)
+		case outcome := <-w.completions:
+			w.finishFile(ctx, outcome.jobID)
+		case result := <-w.plans:
+			w.applyPlan(ctx, result)
 		case <-ticker.C:
-			claimed := w.claimJobs(ctx)
+			w.claim(ctx)
 			w.pollCancellations(ctx)
 			if time.Since(lastPurge) >= 6*time.Hour {
 				w.purge(ctx)
 				lastPurge = time.Now()
 			}
-			if w.cfg.Once && claimed == 0 && w.activeCount() == 0 {
-				return nil
-			}
 		}
 	}
 }
 
-func (w *Worker) claimJobs(ctx context.Context) int {
-	claimed := 0
-	for w.activeCount() < w.cfg.JobSlots {
+func (w *Worker) claim(ctx context.Context) {
+	for len(w.jobs) < w.cfg.Concurrency {
 		job, err := w.repo.ClaimNextJob(ctx, w.name, time.Now().UTC())
 		if err != nil {
 			if ctx.Err() == nil {
 				w.log.Warn("claim next job", "error", err)
 			}
-			return claimed
+			return
 		}
 		if job == nil {
-			return claimed
+			return
 		}
-		claimed++
-		if err := w.addJob(ctx, job); err != nil {
-			w.log.Warn("add job", "job_id", job.ID, "error", err)
-		}
+		w.addJob(ctx, job)
 	}
-	return claimed
 }
 
-func (w *Worker) addJob(ctx context.Context, job *domain.Job) error {
+func (w *Worker) addJob(ctx context.Context, job *domain.Job) {
 	model := w.ingester.Model()
 	version, size, overlap := w.ingester.Chunker()
 	if job.EmbeddingModel != model || job.ChunkerVersion != version || job.ChunkSize != size || job.ChunkOverlap != overlap {
@@ -352,93 +279,151 @@ func (w *Worker) addJob(ctx context.Context, job *domain.Job) error {
 			model, version, size, overlap)
 		_ = w.repo.FailJob(context.Background(), job.ID, message)
 		w.log.Warn("job failed because of config mismatch", "job_id", job.ID, "detail", message)
-		return nil
+		return
 	}
 
 	jobCtx, cancel := context.WithCancel(ctx)
-	rt := &jobRuntime{job: *job, ctx: jobCtx, cancel: cancel}
-	w.mu.Lock()
-	w.active[job.ID] = rt
-	w.mu.Unlock()
+	state := &jobState{id: job.ID, ctx: jobCtx, cancel: cancel}
+	w.jobs[job.ID] = state
+	w.order = append(w.order, state)
 	w.log.Info("job claimed", "job_id", job.ID, "path", job.InputPath)
 
 	if job.CancelRequested {
-		rt.cancelPending = true
+		state.cancelRequested = true
 		cancel()
 		w.cancelQueued(job.ID)
-		w.finalizeIfDone(ctx, job.ID)
-		return nil
+		w.finalizeIfDone(context.Background(), state)
+		return
 	}
+	w.startPlanning(ctx, job)
+}
 
-	if !job.PlanningDone {
-		if err := w.repo.ResetPlanning(jobCtx, job.ID); err != nil {
-			w.removeJob(job.ID)
-			_ = w.repo.RequeueJob(context.Background(), job.ID, w.name)
-			return fmt.Errorf("reset planning: %w", err)
-		}
-		paths, err := w.ingester.Plan(jobCtx, job.InputPath)
-		if err != nil {
-			w.removeJob(job.ID)
-			if jobCtx.Err() != nil {
-				_ = w.repo.RequeueJob(context.Background(), job.ID, w.name)
-				return nil
-			}
-			_ = w.repo.FailJob(context.Background(), job.ID, truncateError(err))
-			return fmt.Errorf("plan job files: %w", err)
-		}
-		if err := w.repo.PlanJobFiles(jobCtx, job.ID, paths); err != nil {
-			w.removeJob(job.ID)
-			_ = w.repo.RequeueJob(context.Background(), job.ID, w.name)
-			return fmt.Errorf("save job files: %w", err)
-		}
-	}
-
-	queued, err := w.repo.QueuedFiles(jobCtx, job.ID)
-	if err != nil {
-		w.removeJob(job.ID)
-		_ = w.repo.RequeueJob(context.Background(), job.ID, w.name)
-		return fmt.Errorf("list queued files: %w", err)
-	}
-	if len(queued) == 0 {
-		w.finalizeIfDone(ctx, job.ID)
-		return nil
-	}
-	w.feeders.Add(1)
+func (w *Worker) startPlanning(ctx context.Context, job *domain.Job) {
+	state := w.jobs[job.ID]
+	w.planners.Add(1)
 	go func() {
-		defer w.feeders.Done()
-		for _, path := range queued {
-			select {
-			case w.tasks <- fileTask{jobID: job.ID, path: path}:
-			case <-jobCtx.Done():
-				return
-			case <-ctx.Done():
-				return
-			}
+		defer w.planners.Done()
+		paths, err := w.ingester.Plan(state.ctx, job.InputPath)
+		select {
+		case w.plans <- planResult{jobID: job.ID, paths: paths, err: err}:
+		case <-state.ctx.Done():
 		}
 	}()
+}
+
+func (w *Worker) applyPlan(ctx context.Context, result planResult) {
+	state := w.jobs[result.jobID]
+	if state == nil {
+		return
+	}
+	if result.err != nil {
+		if state.ctx.Err() != nil {
+			w.finalizeIfDone(ctx, state)
+			return
+		}
+		_ = w.repo.FailJob(context.Background(), state.id, truncateError(result.err))
+		w.log.Warn("plan job files", "job_id", state.id, "error", result.err)
+		w.removeJob(state)
+		return
+	}
+	if state.ctx.Err() != nil {
+		w.finalizeIfDone(ctx, state)
+		return
+	}
+	if err := w.repo.PlanJobFiles(state.ctx, state.id, result.paths); err != nil {
+		w.log.Warn("save job files", "job_id", state.id, "error", err)
+		_ = w.repo.RequeueJob(context.Background(), state.id, w.name)
+		w.removeJob(state)
+		return
+	}
+	queued, err := w.repo.QueuedFiles(state.ctx, state.id)
+	if err != nil {
+		w.log.Warn("list queued files", "job_id", state.id, "error", err)
+		_ = w.repo.RequeueJob(context.Background(), state.id, w.name)
+		w.removeJob(state)
+		return
+	}
+	state.pending = queued
+	state.planned = true
+	if len(state.pending) == 0 {
+		w.finalizeIfDone(ctx, state)
+		return
+	}
+	w.dispatch()
+}
+
+func (w *Worker) finishFile(ctx context.Context, jobID string) {
+	if w.inFiles > 0 {
+		w.inFiles--
+	}
+	state := w.jobs[jobID]
+	if state == nil {
+		return
+	}
+	state.inFlight--
+	w.finalizeIfDone(ctx, state)
+	w.dispatch()
+}
+
+func (w *Worker) dispatch() {
+	for w.inFiles < w.cfg.Concurrency {
+		state := w.pickState()
+		if state == nil {
+			return
+		}
+		path := state.pending[0]
+		state.pending = state.pending[1:]
+		w.tasks <- fileTask{jobID: state.id, path: path, ctx: state.ctx}
+		state.inFlight++
+		w.inFiles++
+	}
+}
+
+func (w *Worker) pickState() *jobState {
+	if len(w.order) == 0 {
+		return nil
+	}
+	limit := w.perJobLimit()
+	for i := 0; i < len(w.order); i++ {
+		index := (w.next + i) % len(w.order)
+		state := w.order[index]
+		if state.ctx.Err() != nil || len(state.pending) == 0 || state.inFlight >= limit {
+			continue
+		}
+		w.next = (index + 1) % len(w.order)
+		return state
+	}
 	return nil
 }
 
+func (w *Worker) perJobLimit() int {
+	if len(w.jobs) <= 1 {
+		return w.cfg.Concurrency
+	}
+	return max(1, (w.cfg.Concurrency+1)/2)
+}
+
 func (w *Worker) pollCancellations(ctx context.Context) {
-	for _, rt := range w.runtimes() {
-		if rt.cancelPending {
+	for _, state := range w.order {
+		if state.cancelRequested {
 			continue
 		}
-		requested, err := w.repo.CancelRequested(context.Background(), rt.job.ID)
+		requested, err := w.repo.CancelRequested(context.Background(), state.id)
 		if err != nil {
 			if ctx.Err() == nil {
-				w.log.Warn("check job cancellation", "job_id", rt.job.ID, "error", err)
+				w.log.Warn("check job cancellation", "job_id", state.id, "error", err)
 			}
 			continue
 		}
 		if !requested {
 			continue
 		}
-		rt.cancelPending = true
-		rt.cancel()
-		w.cancelQueued(rt.job.ID)
-		w.log.Info("job cancellation requested", "job_id", rt.job.ID)
-		w.finalizeIfDone(ctx, rt.job.ID)
+		state.cancelRequested = true
+		state.cancel()
+		state.pending = nil
+		w.cancelQueued(state.id)
+		w.log.Info("job cancellation requested", "job_id", state.id)
+		w.finalizeIfDone(ctx, state)
 	}
 }
 
@@ -450,34 +435,50 @@ func (w *Worker) cancelQueued(jobID string) {
 	}
 }
 
-func (w *Worker) finalizeIfDone(ctx context.Context, jobID string) {
-	if w.runtime(jobID) == nil {
+func (w *Worker) finalizeIfDone(ctx context.Context, state *jobState) {
+	if !state.planned && !state.cancelRequested {
+		// The plan is still running; wait for its result.
 		return
 	}
-	job, done, err := w.repo.FinalizeJob(context.Background(), jobID)
+	if len(state.pending) > 0 || state.inFlight > 0 {
+		return
+	}
+	job, done, err := w.repo.FinalizeJob(context.Background(), state.id)
 	if err != nil {
 		if ctx.Err() == nil {
-			w.log.Warn("finalize job", "job_id", jobID, "error", err)
+			w.log.Warn("finalize job", "job_id", state.id, "error", err)
 		}
 		return
 	}
 	if !done && !job.Status.Terminal() {
 		return
 	}
-	w.removeJob(jobID)
-	w.log.Info("job finished", "job_id", jobID, "status", job.Status)
+	w.removeJob(state)
+	w.log.Info("job finished", "job_id", state.id, "status", job.Status)
+}
+
+func (w *Worker) removeJob(state *jobState) {
+	state.cancel()
+	delete(w.jobs, state.id)
+	for i, candidate := range w.order {
+		if candidate == state {
+			w.order = append(w.order[:i], w.order[i+1:]...)
+			break
+		}
+	}
+	w.next = 0
 }
 
 func (w *Worker) requeueActive() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	for _, rt := range w.runtimes() {
-		rt.cancel()
-		if rt.cancelPending {
+	for _, state := range w.order {
+		state.cancel()
+		if state.cancelRequested {
 			continue
 		}
-		if err := w.repo.RequeueJob(ctx, rt.job.ID, w.name); err != nil {
-			w.log.Warn("requeue job on shutdown", "job_id", rt.job.ID, "error", err)
+		if err := w.repo.RequeueJob(ctx, state.id, w.name); err != nil {
+			w.log.Warn("requeue job on shutdown", "job_id", state.id, "error", err)
 		}
 	}
 }
@@ -496,36 +497,83 @@ func (w *Worker) purge(ctx context.Context) {
 	}
 }
 
-func (w *Worker) runtime(jobID string) *jobRuntime {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.active[jobID]
-}
-
-func (w *Worker) runtimes() []*jobRuntime {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	result := make([]*jobRuntime, 0, len(w.active))
-	for _, rt := range w.active {
-		result = append(result, rt)
+func (w *Worker) processFile(task fileTask) {
+	defer w.reportOutcome(task.jobID)
+	started, err := w.repo.StartJobFile(task.ctx, task.jobID, task.path)
+	if err != nil {
+		if task.ctx.Err() == nil {
+			w.log.Warn("start job file", "job_id", task.jobID, "path", task.path, "error", err)
+		}
+		return
 	}
-	return result
-}
+	if !started {
+		return
+	}
 
-func (w *Worker) removeJob(jobID string) {
-	w.mu.Lock()
-	rt := w.active[jobID]
-	delete(w.active, jobID)
-	w.mu.Unlock()
-	if rt != nil {
-		rt.cancel()
+	lastChunkWrite := time.Time{}
+	hooks := ingest.ProgressHooks{
+		OnStage: func(stage domain.Stage) {
+			if task.ctx.Err() != nil {
+				return
+			}
+			if err := w.repo.SetJobFileStage(task.ctx, task.jobID, task.path, stage); err != nil {
+				w.log.Debug("set job file stage", "job_id", task.jobID, "path", task.path, "error", err)
+			}
+		},
+		OnChunks: func(done int) {
+			if task.ctx.Err() != nil {
+				return
+			}
+			if time.Since(lastChunkWrite) < 500*time.Millisecond {
+				return
+			}
+			lastChunkWrite = time.Now()
+			if err := w.repo.SetJobFileChunks(task.ctx, task.jobID, task.path, done); err != nil {
+				w.log.Debug("set job file chunks", "job_id", task.jobID, "path", task.path, "error", err)
+			}
+		},
+	}
+
+	result, ingestErr := w.ingester.IndexFile(task.ctx, task.path, hooks)
+	status := result.Status
+	chunks := result.Chunks
+	message := ""
+
+	finishCtx, finishCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer finishCancel()
+	if w.runCtx.Err() != nil {
+		if err := w.repo.RequeueJobFile(finishCtx, task.jobID, task.path); err != nil {
+			w.log.Warn("requeue job file", "job_id", task.jobID, "path", task.path, "error", err)
+		}
+		return
+	}
+	switch {
+	case task.ctx.Err() != nil:
+		status = domain.FileCanceled
+	case !status.Terminal():
+		status = domain.FileFailed
+		if ingestErr != nil {
+			message = truncateError(ingestErr)
+		} else {
+			message = "index failed"
+		}
+	case status == domain.FileFailed:
+		if ingestErr != nil {
+			message = truncateError(ingestErr)
+		} else {
+			message = "index failed"
+		}
+	}
+	if err := w.repo.FinishJobFile(finishCtx, task.jobID, task.path, status, chunks, message); err != nil {
+		w.log.Warn("finish job file", "job_id", task.jobID, "path", task.path, "error", err)
 	}
 }
 
-func (w *Worker) activeCount() int {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return len(w.active)
+func (w *Worker) reportOutcome(jobID string) {
+	select {
+	case w.completions <- fileOutcome{jobID: jobID}:
+	case <-w.runCtx.Done():
+	}
 }
 
 func truncateError(err error) string {

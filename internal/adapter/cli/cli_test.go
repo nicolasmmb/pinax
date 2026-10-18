@@ -67,12 +67,11 @@ func testWorkerDeps(t *testing.T) (workerDeps, *jobs.Service) {
 		ChunkOverlap:   overlap,
 	})
 	cfg := config.Config{
-		DocumentRoot:    root,
-		DatabasePath:    ":memory:",
-		IngestWorkers:   2,
-		WorkerJobSlots:  2,
-		EmbedBatchSize:  64,
-		WorkerHeartbeat: time.Second,
+		DocumentRoot:      root,
+		DatabasePath:      ":memory:",
+		WorkerConcurrency: 2,
+		EmbedBatchSize:    64,
+		WorkerHeartbeat:   time.Second,
 	}
 	return workerDeps{Config: cfg, Store: store, Ingest: ingestor}, service
 }

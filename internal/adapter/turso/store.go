@@ -134,8 +134,6 @@ CREATE TABLE IF NOT EXISTS ingest_jobs (
   chunker_version TEXT NOT NULL,
   chunk_size INTEGER NOT NULL,
   chunk_overlap INTEGER NOT NULL,
-  planning_done INTEGER NOT NULL DEFAULT 0 CHECK (planning_done IN (0,1)),
-  planned_at TEXT,
   worker_id TEXT,
   error TEXT,
   created_at TEXT NOT NULL,

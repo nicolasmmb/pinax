@@ -27,13 +27,12 @@ type Config struct {
 	EmbedModel    string        `envx:"name=EMBED_MODEL"`
 	EmbedAPIKey   string        `envx:"name=EMBED_API_KEY"`
 
-	IngestWorkers    int           `envx:"name=PINAX_INGEST_WORKERS,default=4"`
-	WorkerJobSlots   int           `envx:"name=PINAX_WORKER_JOB_SLOTS,default=4"`
-	EmbedBatchSize   int           `envx:"name=PINAX_EMBED_BATCH_SIZE,default=64"`
-	WorkerAutostart  bool          `envx:"name=PINAX_WORKER_AUTOSTART,default=true"`
-	WorkerHeartbeat  time.Duration `envx:"name=PINAX_WORKER_HEARTBEAT,default=5s"`
-	JobRetentionDays int           `envx:"name=PINAX_JOB_RETENTION_DAYS,default=30"`
-	LogLevel         string        `envx:"name=PINAX_LOG_LEVEL,default=info"`
+	WorkerConcurrency int           `envx:"name=PINAX_WORKER_CONCURRENCY,default=4"`
+	EmbedBatchSize    int           `envx:"name=PINAX_EMBED_BATCH_SIZE,default=64"`
+	WorkerAutostart   bool          `envx:"name=PINAX_WORKER_AUTOSTART,default=true"`
+	WorkerHeartbeat   time.Duration `envx:"name=PINAX_WORKER_HEARTBEAT,default=5s"`
+	JobRetentionDays  int           `envx:"name=PINAX_JOB_RETENTION_DAYS,default=30"`
+	LogLevel          string        `envx:"name=PINAX_LOG_LEVEL,default=info"`
 }
 
 func Load() (Config, error) {
@@ -58,11 +57,8 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("EMBED_MODEL cannot be empty")
 		}
 	}
-	if cfg.IngestWorkers < 1 {
-		return Config{}, fmt.Errorf("PINAX_INGEST_WORKERS must be at least 1")
-	}
-	if cfg.WorkerJobSlots < 1 {
-		return Config{}, fmt.Errorf("PINAX_WORKER_JOB_SLOTS must be at least 1")
+	if cfg.WorkerConcurrency < 1 {
+		return Config{}, fmt.Errorf("PINAX_WORKER_CONCURRENCY must be at least 1")
 	}
 	if cfg.EmbedBatchSize < 1 {
 		return Config{}, fmt.Errorf("PINAX_EMBED_BATCH_SIZE must be at least 1")

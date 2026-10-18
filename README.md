@@ -37,8 +37,7 @@ O instalador imprime os valores de `CGO_CFLAGS` e `CGO_LDFLAGS`; configure-os no
 | `EMBED_URL` | depende do provider | URL base da API (`http://127.0.0.1:11434` para Ollama ou `https://api.openai.com/v1` para OpenAI). Aceita APIs compatíveis com o formato OpenAI. |
 | `EMBED_API_KEY` | vazio | Chave para APIs OpenAI ou compatíveis; Ollama não exige chave. |
 | `EMBED_MODEL` | `embeddinggemma-2:740m` para Ollama; obrigatório para OpenAI | Nome do modelo de embeddings. |
-| `PINAX_INGEST_WORKERS` | `4` | Arquivos processados em paralelo pelo worker. |
-| `PINAX_WORKER_JOB_SLOTS` | `4` | Jobs ativos simultâneos no worker. |
+| `PINAX_WORKER_CONCURRENCY` | `4` | Arquivos processados em paralelo e limite de jobs ativos. |
 | `PINAX_EMBED_BATCH_SIZE` | `64` | Chunks enviados por chamada de embedding. |
 | `PINAX_WORKER_AUTOSTART` | `true` | `serve` inicia e supervisiona o processo worker. |
 | `PINAX_WORKER_HEARTBEAT` | `5s` | Intervalo de heartbeat do worker e dos jobs. |
@@ -134,7 +133,9 @@ Mensagens do protocolo MCP usam stdout; diagnósticos de `serve` e `worker` usam
 
 ## Ingestão assíncrona
 
-Cada chamada de `index_path` cria um job persistido no banco. O worker reivindica jobs por um lease único, então apenas um worker processa por base de dados. Se o worker cair, o job volta para a fila e é retomado; arquivos já indexados são pulados por hash.
+Cada chamada de `index_path` cria um job persistido no banco. O worker é o único processo que abre o banco e o socket derivado de `PINAX_DATABASE_PATH` garante um worker por base: o segundo falha ao iniciar. Se o worker cair, o job volta para a fila e é retomado; arquivos já indexados são pulados por hash.
+
+O status do worker vem de uma linha de heartbeat própria. `online` fica verdadeiro enquanto o último heartbeat tem até 15 segundos; depois disso, `stale` fica verdadeiro. Recuperação de jobs usa o heartbeat de cada job, não o registro do worker.
 
 O Turso embutido mantém um lock exclusivo do arquivo por processo. Por isso o worker é o dono exclusivo do banco e o `serve` acessa fila, status, cancelamento e busca via RPC em um Unix socket derivado de `PINAX_DATABASE_PATH` (em `os.TempDir()`). Não abra o mesmo banco com dois workers; o segundo falha ao iniciar. O `serve` reconecta automaticamente se o worker reiniciar.
 

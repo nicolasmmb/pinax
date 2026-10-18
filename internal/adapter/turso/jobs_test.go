@@ -67,10 +67,6 @@ func TestPlanProgressAndFinalize(t *testing.T) {
 	if err := store.PlanJobFiles(ctx, job.ID, paths); err != nil {
 		t.Fatal(err)
 	}
-	planned, err := store.GetJob(ctx, job.ID)
-	if err != nil || !planned.PlanningDone || planned.PlannedAt == nil {
-		t.Fatalf("planning not persisted: %#v, %v", planned, err)
-	}
 	progress, err := store.JobProgress(ctx, job.ID)
 	if err != nil || progress.FilesTotal != 3 || progress.FilesDone != 0 {
 		t.Fatalf("unexpected progress: %#v, %v", progress, err)
@@ -312,5 +308,46 @@ func TestJobsPersistAcrossStores(t *testing.T) {
 	claimed, err := second.ClaimNextJob(ctx, "worker", time.Now().UTC())
 	if err != nil || claimed == nil || claimed.ID != job.ID {
 		t.Fatalf("claim from second store = %#v, %v", claimed, err)
+	}
+}
+
+func TestStatusWorkerStates(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+
+	status, err := store.Status(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Worker.WorkerID != "" || status.Worker.Online || status.Worker.Stale {
+		t.Fatalf("expected no worker, got %#v", status.Worker)
+	}
+
+	now := time.Now().UTC()
+	if err := store.TouchWorker(ctx, domain.WorkerInfo{
+		WorkerID: "worker-1", PID: 42, Hostname: "host", StartedAt: now, HeartbeatAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, err = store.Status(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Worker.Online || status.Worker.Stale || status.Worker.WorkerID != "worker-1" {
+		t.Fatalf("expected online worker, got %#v", status.Worker)
+	}
+
+	old := time.Now().UTC().Add(-time.Minute)
+	if err := store.TouchWorker(ctx, domain.WorkerInfo{
+		WorkerID: "worker-1", PID: 42, Hostname: "host", StartedAt: old, HeartbeatAt: old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, err = store.Status(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Worker.Online || !status.Worker.Stale {
+		t.Fatalf("expected stale worker, got %#v", status.Worker)
 	}
 }

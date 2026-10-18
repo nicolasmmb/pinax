@@ -12,7 +12,6 @@ import (
 type WorkerStore interface {
 	QueuedFiles(context.Context, string) ([]string, error)
 	PlanJobFiles(context.Context, string, []string) error
-	ResetPlanning(context.Context, string) error
 	StartJobFile(context.Context, string, string) (bool, error)
 	SetJobFileStage(context.Context, string, string, domain.Stage) error
 	SetJobFileChunks(context.Context, string, string, int) error
@@ -20,6 +19,7 @@ type WorkerStore interface {
 	RequeueJobFile(context.Context, string, string) error
 	CancelQueuedFiles(context.Context, string) error
 	ClaimNextJob(context.Context, string, time.Time) (*domain.Job, error)
+	ActiveJobIDs(context.Context, string) ([]string, error)
 	HeartbeatJobs(context.Context, []string, string, time.Time) error
 	RecoverStaleJobs(context.Context, time.Time, time.Duration) (int, error)
 	RequeueJob(context.Context, string, string) error

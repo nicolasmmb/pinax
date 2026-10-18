@@ -76,7 +76,7 @@ func TestSearchRemainsResponsiveDuringIngestion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker, err := jobs.NewWorker(store, ingestor, jobs.WorkerConfig{Workers: 4, JobSlots: 2})
+	worker, err := jobs.NewWorker(store, ingestor, jobs.WorkerConfig{Concurrency: 4})
 	if err != nil {
 		t.Fatal(err)
 	}

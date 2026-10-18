@@ -17,7 +17,7 @@ const timeLayout = "2006-01-02T15:04:05.000000000Z"
 
 const jobColumns = `id, input_path, input_kind, status, cancel_requested,
 embedding_model, chunker_version, chunk_size, chunk_overlap,
-planning_done, planned_at, worker_id, error,
+worker_id, error,
 created_at, started_at, finished_at, heartbeat_at`
 
 func formatTime(t time.Time) string {
@@ -73,8 +73,6 @@ func scanJob(scanner jobScanner) (domain.Job, error) {
 	var (
 		job             domain.Job
 		cancelRequested int
-		planningDone    int
-		plannedAt       sql.NullString
 		workerID        sql.NullString
 		jobError        sql.NullString
 		createdAt       string
@@ -94,8 +92,6 @@ func scanJob(scanner jobScanner) (domain.Job, error) {
 		&job.ChunkerVersion,
 		&job.ChunkSize,
 		&job.ChunkOverlap,
-		&planningDone,
-		&plannedAt,
 		&workerID,
 		&jobError,
 		&createdAt,
@@ -109,13 +105,9 @@ func scanJob(scanner jobScanner) (domain.Job, error) {
 	job.InputKind = domain.InputKind(kind)
 	job.Status = domain.JobStatus(status)
 	job.CancelRequested = cancelRequested == 1
-	job.PlanningDone = planningDone == 1
 	job.WorkerID = workerID.String
 	job.Error = jobError.String
 	if job.CreatedAt, err = parseTime(createdAt); err != nil {
-		return domain.Job{}, err
-	}
-	if job.PlannedAt, err = parseNullableTime(plannedAt); err != nil {
 		return domain.Job{}, err
 	}
 	if job.StartedAt, err = parseNullableTime(startedAt); err != nil {
@@ -141,8 +133,8 @@ func (s *Store) EnqueueJob(ctx context.Context, request domain.EnqueueRequest) (
 	now := time.Now().UTC()
 	_, err = s.db.ExecContext(ctx, `INSERT INTO ingest_jobs(
 id, input_path, input_kind, status, cancel_requested, embedding_model,
-chunker_version, chunk_size, chunk_overlap, planning_done, created_at)
-VALUES(?, ?, ?, 'queued', 0, ?, ?, ?, ?, 0, ?)`,
+chunker_version, chunk_size, chunk_overlap, created_at)
+VALUES(?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)`,
 		id, request.InputPath, string(request.InputKind), request.EmbeddingModel,
 		request.ChunkerVersion, request.ChunkSize, request.ChunkOverlap, formatTime(now))
 	if err != nil {
@@ -385,27 +377,6 @@ VALUES(?, ?, 'queued')`, id, path); err != nil {
 				return fmt.Errorf("plan file %s: %w", path, err)
 			}
 		}
-	}
-	now := formatTime(time.Now().UTC())
-	if _, err := tx.ExecContext(ctx, `UPDATE ingest_jobs
-SET planning_done = 1, planned_at = ? WHERE id = ?`, now, id); err != nil {
-		return fmt.Errorf("mark planning done: %w", err)
-	}
-	return tx.Commit()
-}
-
-func (s *Store) ResetPlanning(ctx context.Context, id string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM ingest_job_files WHERE job_id = ?`, id); err != nil {
-		return fmt.Errorf("reset job files: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE ingest_jobs
-SET planning_done = 0, planned_at = NULL WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("reset planning: %w", err)
 	}
 	return tx.Commit()
 }
@@ -792,6 +763,24 @@ FROM worker_heartbeat WHERE id = 1`).Scan(
 		return nil, err
 	}
 	return &info, nil
+}
+
+func (s *Store) ActiveJobIDs(ctx context.Context, workerID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM ingest_jobs
+WHERE worker_id = ? AND status = 'running'`, workerID)
+	if err != nil {
+		return nil, fmt.Errorf("list active jobs: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (s *Store) HeartbeatJobs(ctx context.Context, ids []string, workerID string, now time.Time) error {

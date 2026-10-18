@@ -8,7 +8,7 @@ import (
 
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{"PINAX_DOCUMENT_ROOT", "PINAX_DATABASE_PATH", "EMBED_PROVIDER", "EMBED_URL", "EMBED_MODEL", "EMBED_API_KEY"} {
+	for _, key := range []string{"PINAX_DOCUMENT_ROOT", "PINAX_DATABASE_PATH", "EMBED_PROVIDER", "EMBED_URL", "EMBED_MODEL", "EMBED_API_KEY", "PINAX_WORKER_CONCURRENCY", "PINAX_INGEST_WORKERS", "PINAX_WORKER_JOB_SLOTS"} {
 		value, exists := os.LookupEnv(key)
 		if err := os.Unsetenv(key); err != nil {
 			t.Fatal(err)
@@ -51,5 +51,20 @@ func TestLoadOpenAIDefaultURLRequiresModel(t *testing.T) {
 	_, err := Load()
 	if err == nil || !strings.Contains(err.Error(), "EMBED_MODEL cannot be empty") {
 		t.Fatalf("expected missing model error, got %v", err)
+	}
+}
+
+func TestLoadWorkerConcurrency(t *testing.T) {
+	clearConfigEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkerConcurrency != 4 {
+		t.Fatalf("default concurrency = %d, want 4", cfg.WorkerConcurrency)
+	}
+	t.Setenv("PINAX_WORKER_CONCURRENCY", "0")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PINAX_WORKER_CONCURRENCY") {
+		t.Fatalf("expected concurrency validation error, got %v", err)
 	}
 }

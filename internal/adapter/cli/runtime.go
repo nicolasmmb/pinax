@@ -54,7 +54,7 @@ func newWorkerDeps(ctx context.Context, cfg config.Config) (workerDeps, func(), 
 	}
 	store, err := turso.OpenWithOptions(ctx, turso.Options{
 		Path:         cfg.DatabasePath,
-		MaxOpenConns: cfg.IngestWorkers + 4,
+		MaxOpenConns: cfg.WorkerConcurrency + 4,
 		BusyTimeout:  10 * time.Second,
 	})
 	if err != nil {

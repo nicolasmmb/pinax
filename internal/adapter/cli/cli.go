@@ -98,8 +98,7 @@ func runWorker(ctx context.Context, deps workerDeps, once bool, stderr io.Writer
 	heartbeat := deps.Config.WorkerHeartbeat
 	jobStaleAfter := max(6*heartbeat, 30*time.Second)
 	worker, err := jobs.NewWorker(deps.Store, deps.Ingest, jobs.WorkerConfig{
-		Workers:       deps.Config.IngestWorkers,
-		JobSlots:      deps.Config.WorkerJobSlots,
+		Concurrency:   deps.Config.WorkerConcurrency,
 		Heartbeat:     heartbeat,
 		JobStaleAfter: jobStaleAfter,
 		Retention:     time.Duration(deps.Config.JobRetentionDays) * 24 * time.Hour,

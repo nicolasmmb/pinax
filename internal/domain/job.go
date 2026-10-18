@@ -105,14 +105,12 @@ type Job struct {
 	ChunkSize      int
 	ChunkOverlap   int
 
-	PlanningDone bool
-	PlannedAt    *time.Time
-	WorkerID     string
-	Error        string
-	CreatedAt    time.Time
-	StartedAt    *time.Time
-	FinishedAt   *time.Time
-	HeartbeatAt  *time.Time
+	WorkerID    string
+	Error       string
+	CreatedAt   time.Time
+	StartedAt   *time.Time
+	FinishedAt  *time.Time
+	HeartbeatAt *time.Time
 }
 
 func (j Job) Terminal() bool { return j.Status.Terminal() }

@@ -3,6 +3,7 @@ package jobs_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -14,14 +15,17 @@ import (
 )
 
 type fakeIngester struct {
-	mu        sync.Mutex
-	started   chan string
-	release   chan struct{}
-	active    int
-	maxActive int
-	paths     map[string][]string
-	blocking  bool
-	fail      map[string]bool
+	mu          sync.Mutex
+	started     chan string
+	planStarted chan string
+	planRelease chan struct{}
+	release     chan struct{}
+	active      int
+	maxActive   int
+	paths       map[string][]string
+	blocking    bool
+	delay       time.Duration
+	fail        map[string]bool
 }
 
 func newFakeIngester(paths map[string][]string) *fakeIngester {
@@ -38,12 +42,31 @@ func (f *fakeIngester) Chunker() (string, int, int) {
 func (f *fakeIngester) ResolveInput(path string) (string, domain.InputKind, error) {
 	return path, domain.InputDir, nil
 }
-func (f *fakeIngester) Plan(_ context.Context, path string) ([]string, error) {
+func (f *fakeIngester) Plan(ctx context.Context, path string) ([]string, error) {
+	if f.planStarted != nil {
+		select {
+		case f.planStarted <- path:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		select {
+		case <-f.planRelease:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.paths[path]...), nil
 }
 func (f *fakeIngester) IndexFile(ctx context.Context, path string, hooks ingest.ProgressHooks) (ingest.FileResult, error) {
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return ingest.FileResult{Status: domain.FileCanceled, Err: ctx.Err()}, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	f.active++
 	if f.active > f.maxActive {
@@ -154,7 +177,7 @@ func TestWorkerProcessesFilesInParallel(t *testing.T) {
 	ingester := newFakeIngester(map[string][]string{"/docs": paths})
 	ingester.blocking = true
 	ingester.release = make(chan struct{})
-	startWorker(t, store, ingester, jobs.WorkerConfig{Workers: 4, JobSlots: 1})
+	startWorker(t, store, ingester, jobs.WorkerConfig{Concurrency: 4})
 
 	for i := 0; i < 4; i++ {
 		select {
@@ -200,7 +223,7 @@ func TestWorkerRunsMultipleJobs(t *testing.T) {
 	})
 	ingester.blocking = true
 	ingester.release = make(chan struct{})
-	startWorker(t, store, ingester, jobs.WorkerConfig{Workers: 2, JobSlots: 2})
+	startWorker(t, store, ingester, jobs.WorkerConfig{Concurrency: 2})
 
 	seen := map[string]bool{}
 	for i := 0; i < 2; i++ {
@@ -232,7 +255,7 @@ func TestWorkerCancelsRunningJob(t *testing.T) {
 	ingester := newFakeIngester(map[string][]string{"/docs": paths})
 	ingester.blocking = true
 	ingester.release = make(chan struct{})
-	startWorker(t, store, ingester, jobs.WorkerConfig{Workers: 2, JobSlots: 1})
+	startWorker(t, store, ingester, jobs.WorkerConfig{Concurrency: 2})
 
 	select {
 	case <-ingester.started:
@@ -264,7 +287,7 @@ func TestWorkerIsolatesFileFailures(t *testing.T) {
 	job := enqueueWorkerJob(t, store, "/docs", paths, "test-model")
 	ingester := newFakeIngester(map[string][]string{"/docs": paths})
 	ingester.fail = map[string]bool{"/docs/b.md": true}
-	startWorker(t, store, ingester, jobs.WorkerConfig{Workers: 2, JobSlots: 1})
+	startWorker(t, store, ingester, jobs.WorkerConfig{Concurrency: 2})
 	waitFor(t, 10*time.Second, "job with errors", func() bool {
 		stored, err := store.GetJob(ctx, job.ID)
 		return err == nil && stored.Status == domain.JobCompletedWithErrors
@@ -284,7 +307,7 @@ func TestWorkerFailsOnConfigMismatch(t *testing.T) {
 	store := testWorkerStore(t)
 	job := enqueueWorkerJob(t, store, "/docs", []string{"/docs/a.md"}, "other-model")
 	ingester := newFakeIngester(map[string][]string{"/docs": {"/docs/a.md"}})
-	startWorker(t, store, ingester, jobs.WorkerConfig{Workers: 1, JobSlots: 1})
+	startWorker(t, store, ingester, jobs.WorkerConfig{Concurrency: 1})
 	waitFor(t, 5*time.Second, "job failure", func() bool {
 		stored, err := store.GetJob(ctx, job.ID)
 		return err == nil && stored.Status == domain.JobFailed
@@ -311,7 +334,7 @@ func TestWorkerRecoversStaleJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	ingester := newFakeIngester(map[string][]string{"/docs": paths})
-	startWorker(t, store, ingester, jobs.WorkerConfig{Workers: 2, JobSlots: 1})
+	startWorker(t, store, ingester, jobs.WorkerConfig{Concurrency: 2})
 	waitFor(t, 10*time.Second, "recovered job completion", func() bool {
 		stored, err := store.GetJob(ctx, job.ID)
 		return err == nil && stored.Status == domain.JobCompleted
@@ -330,7 +353,7 @@ func TestWorkerRequeuesRunningFilesOnShutdown(t *testing.T) {
 	ingester := newFakeIngester(map[string][]string{"/docs": paths})
 	ingester.blocking = true
 	ingester.release = make(chan struct{})
-	worker, err := jobs.NewWorker(store, ingester, jobs.WorkerConfig{Workers: 1, JobSlots: 1})
+	worker, err := jobs.NewWorker(store, ingester, jobs.WorkerConfig{Concurrency: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +389,7 @@ func TestWorkerRequeuesRunningFilesOnShutdown(t *testing.T) {
 	}
 
 	fast := newFakeIngester(map[string][]string{"/docs": paths})
-	second, err := jobs.NewWorker(store, fast, jobs.WorkerConfig{Workers: 2, JobSlots: 1, Once: true})
+	second, err := jobs.NewWorker(store, fast, jobs.WorkerConfig{Concurrency: 2, Once: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +410,7 @@ func TestWorkerOnceDrainsQueue(t *testing.T) {
 	paths := []string{"/docs/a.md", "/docs/b.md"}
 	job := enqueueWorkerJob(t, store, "/docs", paths, "test-model")
 	ingester := newFakeIngester(map[string][]string{"/docs": paths})
-	worker, err := jobs.NewWorker(store, ingester, jobs.WorkerConfig{Workers: 2, JobSlots: 1, Once: true})
+	worker, err := jobs.NewWorker(store, ingester, jobs.WorkerConfig{Concurrency: 2, Once: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,5 +422,121 @@ func TestWorkerOnceDrainsQueue(t *testing.T) {
 	stored, err := store.GetJob(ctx, job.ID)
 	if err != nil || stored.Status != domain.JobCompleted {
 		t.Fatalf("job = %#v, %v", stored, err)
+	}
+}
+
+func TestCancelDuringPlanning(t *testing.T) {
+	ctx := context.Background()
+	store := testWorkerStore(t)
+	paths := []string{"/docs/a.md", "/docs/b.md"}
+	job := enqueueWorkerJob(t, store, "/docs", paths, "test-model")
+	ingester := newFakeIngester(map[string][]string{"/docs": paths})
+	ingester.planStarted = make(chan string, 1)
+	ingester.planRelease = make(chan struct{})
+	defer close(ingester.planRelease)
+	startWorker(t, store, ingester, jobs.WorkerConfig{Concurrency: 2})
+
+	select {
+	case <-ingester.planStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not start planning")
+	}
+	if _, err := store.RequestCancel(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, "job cancellation", func() bool {
+		stored, err := store.GetJob(ctx, job.ID)
+		return err == nil && stored.Status == domain.JobCanceled
+	})
+	files, err := store.JobFiles(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if file.Status != domain.FileCanceled {
+			t.Fatalf("file %s status = %s, want canceled", file.Path, file.Status)
+		}
+	}
+}
+
+func TestSmallJobIsNotStarved(t *testing.T) {
+	ctx := context.Background()
+	store := testWorkerStore(t)
+	largePaths := make([]string, 20)
+	for i := range largePaths {
+		largePaths[i] = fmt.Sprintf("/large/%02d.md", i)
+	}
+	large := enqueueWorkerJob(t, store, "/large", largePaths, "test-model")
+	small := enqueueWorkerJob(t, store, "/small", []string{"/small/one.md"}, "test-model")
+	ingester := newFakeIngester(map[string][]string{
+		"/large": largePaths,
+		"/small": {"/small/one.md"},
+	})
+	ingester.delay = 15 * time.Millisecond
+	startWorker(t, store, ingester, jobs.WorkerConfig{Concurrency: 4})
+
+	waitFor(t, 10*time.Second, "small job completion", func() bool {
+		stored, err := store.GetJob(ctx, small.ID)
+		return err == nil && stored.Status == domain.JobCompleted
+	})
+	stored, err := store.GetJob(ctx, large.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status == domain.JobCompleted {
+		t.Fatal("large job completed before the small job could progress")
+	}
+	waitFor(t, 20*time.Second, "large job completion", func() bool {
+		stored, err := store.GetJob(ctx, large.ID)
+		return err == nil && stored.Status == domain.JobCompleted
+	})
+}
+
+func TestResumePreservesTerminalFiles(t *testing.T) {
+	ctx := context.Background()
+	store := testWorkerStore(t)
+	paths := []string{"/docs/a.md", "/docs/b.md"}
+	job := enqueueWorkerJob(t, store, "/docs", paths, "test-model")
+	claimed, err := store.ClaimNextJob(ctx, "old-worker", time.Now().UTC())
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %#v, %v", claimed, err)
+	}
+	if _, err := store.StartJobFile(ctx, job.ID, paths[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishJobFile(ctx, job.ID, paths[0], domain.FileIndexed, 3, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RequeueJob(ctx, job.ID, "old-worker"); err != nil {
+		t.Fatal(err)
+	}
+
+	ingester := newFakeIngester(map[string][]string{"/docs": paths})
+	worker, err := jobs.NewWorker(store, ingester, jobs.WorkerConfig{Concurrency: 2, Once: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := store.GetJob(ctx, job.ID)
+	if err != nil || stored.Status != domain.JobCompleted {
+		t.Fatalf("job = %#v, %v", stored, err)
+	}
+	seen := map[string]bool{}
+	for {
+		select {
+		case path := <-ingester.started:
+			seen[path] = true
+			continue
+		default:
+		}
+		break
+	}
+	if seen[paths[0]] {
+		t.Fatalf("terminal file was indexed again: %v", seen)
+	}
+	if !seen[paths[1]] {
+		t.Fatalf("queued file was not indexed: %v", seen)
 	}
 }
