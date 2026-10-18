@@ -43,7 +43,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, runtime R
 			stop := startWorkerSupervisor(ctx, stderr, logger)
 			defer stop()
 		}
-		server := mcpadapter.NewServer(runtime.Ingest, runtime.Query)
+		server := mcpadapter.NewServer(runtime.Jobs, runtime.Query)
 		return server.Run(ctx, &mcp.StdioTransport{})
 	case "worker":
 		flags := flag.NewFlagSet("worker", flag.ContinueOnError)
