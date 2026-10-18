@@ -15,7 +15,7 @@
           "PINAX_DOCUMENT_ROOT": "/Users/nicolas.mmb/Downloads/pinax/documents",
           "PINAX_DATABASE_PATH": "/Users/nicolas.mmb/Downloads/pinax/data/pinax.db",
           "EMBED_URL": "http://homelab:12240/",
-          "EMBED_MODEL": "embeddinggemma-2:740m",
+          "EMBED_MODEL": "embeddinggemma-2:270m",
           "CGO_CFLAGS": "-I/Users/nicolas.mmb/Library/Caches/pdf_oxide/v0.3.78/include",
           "CGO_LDFLAGS": "/Users/nicolas.mmb/Library/Caches/pdf_oxide/v0.3.78/lib/darwin_arm64/libpdf_oxide.a -framework CoreFoundation -framework Security -framework SystemConfiguration -liconv -lresolv"
         }
