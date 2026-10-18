@@ -351,3 +351,79 @@ func TestStatusWorkerStates(t *testing.T) {
 		t.Fatalf("expected stale worker, got %#v", status.Worker)
 	}
 }
+
+func TestClaimWithConcurrentHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	job := enqueueTestJob(t, store, "/docs", domain.InputDir)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			now := time.Now().UTC()
+			_ = store.TouchWorker(ctx, domain.WorkerInfo{
+				WorkerID: "worker", PID: 1, Hostname: "host", StartedAt: now, HeartbeatAt: now,
+			})
+		}
+	}()
+
+	var claimed *domain.Job
+	for i := 0; i < 200 && claimed == nil; i++ {
+		var err error
+		claimed, err = store.ClaimNextJob(ctx, "worker", time.Now().UTC())
+		if err != nil {
+			t.Fatalf("claim with concurrent heartbeat: %v", err)
+		}
+	}
+	<-done
+	if claimed == nil || claimed.ID != job.ID {
+		t.Fatalf("claimed = %#v, want job %s", claimed, job.ID)
+	}
+}
+
+func TestFinalizeWithConcurrentHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	job := enqueueTestJob(t, store, "/docs", domain.InputDir)
+	if err := store.PlanJobFiles(ctx, job.ID, []string{"/docs/a.md"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimNextJob(ctx, "worker", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StartJobFile(ctx, job.ID, "/docs/a.md"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishJobFile(ctx, job.ID, "/docs/a.md", domain.FileIndexed, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			now := time.Now().UTC()
+			_ = store.TouchWorker(ctx, domain.WorkerInfo{
+				WorkerID: "worker", PID: 1, Hostname: "host", StartedAt: now, HeartbeatAt: now,
+			})
+			_ = store.HeartbeatJobs(ctx, []string{job.ID}, "worker", now)
+		}
+	}()
+
+	var final domain.Job
+	for i := 0; i < 200; i++ {
+		stored, done, err := store.FinalizeJob(ctx, job.ID)
+		if err != nil {
+			t.Fatalf("finalize with concurrent heartbeat: %v", err)
+		}
+		final = stored
+		if done {
+			break
+		}
+	}
+	<-done
+	if final.Status != domain.JobCompleted {
+		t.Fatalf("final status = %s, want completed", final.Status)
+	}
+}

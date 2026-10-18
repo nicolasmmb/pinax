@@ -57,6 +57,22 @@ func nullableTime(value *time.Time) any {
 	return formatTime(*value)
 }
 
+func retrySnapshot(ctx context.Context, fn func(context.Context) error) error {
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		err = fn(ctx)
+		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "snapshot is stale") {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 20 * time.Millisecond):
+		}
+	}
+	return err
+}
+
 func newJobID() (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -454,44 +470,17 @@ WHERE job_id = ? AND status = 'queued'`,
 }
 
 func (s *Store) ClaimNextJob(ctx context.Context, workerID string, now time.Time) (*domain.Job, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	row := tx.QueryRowContext(ctx, `SELECT `+jobColumns+` FROM ingest_jobs
-WHERE status = 'queued' ORDER BY created_at LIMIT 1`)
+	row := s.db.QueryRowContext(ctx, `UPDATE ingest_jobs
+SET status = 'running', worker_id = ?, started_at = COALESCE(started_at, ?), heartbeat_at = ?
+WHERE id = (SELECT id FROM ingest_jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1)
+RETURNING `+jobColumns, workerID, formatTime(now), formatTime(now))
 	job, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("claim next job: %w", err)
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE ingest_jobs
-SET status = 'running', worker_id = ?, started_at = COALESCE(started_at, ?), heartbeat_at = ?
-WHERE id = ? AND status = 'queued'`, workerID, formatTime(now), formatTime(now), job.ID)
-	if err != nil {
 		return nil, fmt.Errorf("claim job: %w", err)
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if affected != 1 {
-		return nil, nil
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	job.Status = domain.JobRunning
-	job.WorkerID = workerID
-	if job.StartedAt == nil {
-		started := now
-		job.StartedAt = &started
-	}
-	heartbeat := now
-	job.HeartbeatAt = &heartbeat
 	return &job, nil
 }
 
@@ -512,6 +501,16 @@ WHERE id = ? AND worker_id = ? AND status = 'running'`, formatTime(now), id, wor
 }
 
 func (s *Store) RecoverStaleJobs(ctx context.Context, now time.Time, timeout time.Duration) (int, error) {
+	recovered := 0
+	err := retrySnapshot(ctx, func(ctx context.Context) error {
+		var err error
+		recovered, err = s.recoverStaleJobsOnce(ctx, now, timeout)
+		return err
+	})
+	return recovered, err
+}
+
+func (s *Store) recoverStaleJobsOnce(ctx context.Context, now time.Time, timeout time.Duration) (int, error) {
 	before := formatTime(now.Add(-timeout))
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -580,6 +579,19 @@ WHERE job_id = ? AND status = 'running'`, id); err != nil {
 }
 
 func (s *Store) FinalizeJob(ctx context.Context, id string) (domain.Job, bool, error) {
+	var (
+		job  domain.Job
+		done bool
+	)
+	err := retrySnapshot(ctx, func(ctx context.Context) error {
+		var err error
+		job, done, err = s.finalizeJobOnce(ctx, id)
+		return err
+	})
+	return job, done, err
+}
+
+func (s *Store) finalizeJobOnce(ctx context.Context, id string) (domain.Job, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.Job{}, false, err
@@ -646,6 +658,16 @@ WHERE job_id = ? AND status IN ('queued','running')`, message, now, id); err != 
 }
 
 func (s *Store) RequestCancel(ctx context.Context, id string) (domain.Job, error) {
+	var job domain.Job
+	err := retrySnapshot(ctx, func(ctx context.Context) error {
+		var err error
+		job, err = s.requestCancelOnce(ctx, id)
+		return err
+	})
+	return job, err
+}
+
+func (s *Store) requestCancelOnce(ctx context.Context, id string) (domain.Job, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.Job{}, err
