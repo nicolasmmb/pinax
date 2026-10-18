@@ -3,13 +3,14 @@ package cli
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/nicolasmmb/pinax/internal/adapter/files"
 	"github.com/nicolasmmb/pinax/internal/adapter/ollama"
 	"github.com/nicolasmmb/pinax/internal/adapter/openai"
 	"github.com/nicolasmmb/pinax/internal/adapter/turso"
 	"github.com/nicolasmmb/pinax/internal/app/ingest"
-	"github.com/nicolasmmb/pinax/internal/app/query"
+	"github.com/nicolasmmb/pinax/internal/app/jobs"
 	"github.com/nicolasmmb/pinax/internal/config"
 )
 
@@ -19,21 +20,64 @@ type embedder interface {
 	EmbedQuery(context.Context, string) ([]float32, error)
 }
 
-func newRuntime(ctx context.Context, cfg config.Config) (Runtime, func(), error) {
+type serveDeps struct {
+	Config    config.Config
+	Embedder  embedder
+	Validator *ingest.Validator
+}
+
+type workerDeps struct {
+	Config config.Config
+	Store  *turso.Store
+	Ingest *ingest.Service
+}
+
+type statusDeps struct {
+	Config config.Config
+}
+
+func newServeDeps(cfg config.Config) (serveDeps, error) {
 	embeddings, err := newEmbedder(cfg)
 	if err != nil {
-		return Runtime{}, nil, err
+		return serveDeps{}, err
 	}
-	store, err := turso.Open(ctx, cfg.DatabasePath)
+	validator, err := ingest.NewValidator(cfg.DocumentRoot, []ingest.Extractor{files.Markdown{}, files.PDF{}})
 	if err != nil {
-		return Runtime{}, nil, err
+		return serveDeps{}, err
+	}
+	return serveDeps{Config: cfg, Embedder: embeddings, Validator: validator}, nil
+}
+
+func newWorkerDeps(ctx context.Context, cfg config.Config) (workerDeps, func(), error) {
+	embeddings, err := newEmbedder(cfg)
+	if err != nil {
+		return workerDeps{}, nil, err
+	}
+	store, err := turso.OpenWithOptions(ctx, turso.Options{
+		Path:         cfg.DatabasePath,
+		MaxOpenConns: cfg.WorkerConcurrency + 4,
+		BusyTimeout:  10 * time.Second,
+	})
+	if err != nil {
+		return workerDeps{}, nil, err
 	}
 	ingestor, err := ingest.New(cfg.DocumentRoot, []ingest.Extractor{files.Markdown{}, files.PDF{}}, embeddings, store)
 	if err != nil {
 		_ = store.Close()
-		return Runtime{}, nil, err
+		return workerDeps{}, nil, err
 	}
-	return Runtime{Ingest: ingestor, Query: query.New(embeddings, store)}, func() { _ = store.Close() }, nil
+	ingestor.SetEmbedBatchSize(cfg.EmbedBatchSize)
+	return workerDeps{Config: cfg, Store: store, Ingest: ingestor}, func() { _ = store.Close() }, nil
+}
+
+func jobSnapshot(model string) jobs.SnapshotConfig {
+	version, size, overlap := ingest.ChunkerDefaults()
+	return jobs.SnapshotConfig{
+		EmbeddingModel: model,
+		ChunkerVersion: version,
+		ChunkSize:      size,
+		ChunkOverlap:   overlap,
+	}
 }
 
 func newEmbedder(cfg config.Config) (embedder, error) {

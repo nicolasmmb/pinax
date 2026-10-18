@@ -2,8 +2,10 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nicolasmmb/pinax/internal/domain"
@@ -197,6 +199,122 @@ func TestIndexRejectsInconsistentDimensions(t *testing.T) {
 	}
 	if len(report.Failures) == 0 {
 		t.Fatal("expected inconsistent dimensions to be rejected")
+	}
+}
+
+type recordingEmbedder struct {
+	batches []int
+}
+
+func (e *recordingEmbedder) Model() string { return "model" }
+func (e *recordingEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]float32, error) {
+	e.batches = append(e.batches, len(texts))
+	vectors := make([][]float32, len(texts))
+	for i := range vectors {
+		vectors[i] = []float32{1, 0}
+	}
+	return vectors, nil
+}
+
+func TestIndexFileReportsStagesBatchesAndChunks(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "notes.md")
+	content := strings.Repeat("documento de teste com varias palavras ", 40)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo := &testRepository{}
+	embedder := &recordingEmbedder{}
+	service, err := New(root, []Extractor{testExtractor{}}, embedder, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.chunkSize = 20
+	service.chunkOverlap = 0
+	service.embedBatchSize = 3
+	var (
+		stages []domain.Stage
+		chunks []int
+	)
+	result, err := service.IndexFile(context.Background(), path, ProgressHooks{
+		OnStage: func(stage domain.Stage) { stages = append(stages, stage) },
+		OnChunks: func(done int) {
+			chunks = append(chunks, done)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != domain.FileIndexed || result.Chunks == 0 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	wantStages := []domain.Stage{
+		domain.StageHashing,
+		domain.StageExtracting,
+		domain.StageChunking,
+		domain.StageEmbedding,
+		domain.StageSaving,
+	}
+	if len(stages) != len(wantStages) {
+		t.Fatalf("stages = %#v, want %#v", stages, wantStages)
+	}
+	for i := range wantStages {
+		if stages[i] != wantStages[i] {
+			t.Fatalf("stages = %#v, want %#v", stages, wantStages)
+		}
+	}
+	if len(embedder.batches) < 2 {
+		t.Fatalf("expected multiple embedding batches, got %#v", embedder.batches)
+	}
+	for _, size := range embedder.batches {
+		if size > 3 {
+			t.Fatalf("batch larger than configured: %#v", embedder.batches)
+		}
+	}
+	if len(chunks) != len(embedder.batches) || chunks[len(chunks)-1] != result.Chunks {
+		t.Fatalf("chunk progress = %#v, result chunks = %d", chunks, result.Chunks)
+	}
+	for i := 1; i < len(chunks); i++ {
+		if chunks[i] <= chunks[i-1] {
+			t.Fatalf("chunk progress not monotonic: %#v", chunks)
+		}
+	}
+}
+
+type cancelingEmbedder struct {
+	cancel context.CancelFunc
+}
+
+func (cancelingEmbedder) Model() string { return "model" }
+func (e cancelingEmbedder) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	e.cancel()
+	return nil, ctx.Err()
+}
+
+func TestIndexFileCancellationDoesNotPersist(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "notes.md")
+	if err := os.WriteFile(path, []byte("conteudo suficiente para gerar chunks"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo := &testRepository{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service, err := New(root, []Extractor{testExtractor{}}, cancelingEmbedder{cancel: cancel}, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.chunkSize = 10
+	service.chunkOverlap = 0
+	result, err := service.IndexFile(ctx, path, ProgressHooks{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if result.Status != domain.FileCanceled {
+		t.Fatalf("status = %s, want canceled", result.Status)
+	}
+	if repo.replacements != 0 {
+		t.Fatalf("canceled file was persisted %d times", repo.replacements)
 	}
 }
 
