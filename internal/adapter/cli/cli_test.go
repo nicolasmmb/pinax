@@ -15,7 +15,6 @@ import (
 	"github.com/nicolasmmb/pinax/internal/adapter/turso"
 	"github.com/nicolasmmb/pinax/internal/app/ingest"
 	"github.com/nicolasmmb/pinax/internal/app/jobs"
-	"github.com/nicolasmmb/pinax/internal/app/query"
 	"github.com/nicolasmmb/pinax/internal/config"
 	"github.com/nicolasmmb/pinax/internal/domain"
 )
@@ -45,7 +44,7 @@ func (cliEmbedder) EmbedQuery(context.Context, string) ([]float32, error) {
 	return []float32{1, 0}, nil
 }
 
-func testRuntime(t *testing.T) Runtime {
+func testWorkerDeps(t *testing.T) (workerDeps, *jobs.Service) {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "notes.md"), []byte("conteudo de teste"), 0o600); err != nil {
@@ -56,48 +55,42 @@ func testRuntime(t *testing.T) Runtime {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	embedder := cliEmbedder{}
-	ingestor, err := ingest.New(root, []ingest.Extractor{cliExtractor{}}, embedder, store)
+	ingestor, err := ingest.New(root, []ingest.Extractor{cliExtractor{}}, cliEmbedder{}, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	version, size, overlap := ingestor.Chunker()
-	jobService := jobs.NewService(store, ingestor, jobs.SnapshotConfig{
+	service := jobs.NewService(store, ingestor, jobs.SnapshotConfig{
 		EmbeddingModel: ingestor.Model(),
 		ChunkerVersion: version,
 		ChunkSize:      size,
 		ChunkOverlap:   overlap,
 	})
-	return Runtime{
-		Config: config.Config{
-			DocumentRoot:    root,
-			DatabasePath:    ":memory:",
-			IngestWorkers:   2,
-			WorkerJobSlots:  2,
-			EmbedBatchSize:  64,
-			WorkerHeartbeat: time.Second,
-		},
-		Ingest: ingestor,
-		Query:  query.New(embedder, store),
-		Jobs:   jobService,
-		Store:  store,
+	cfg := config.Config{
+		DocumentRoot:    root,
+		DatabasePath:    ":memory:",
+		IngestWorkers:   2,
+		WorkerJobSlots:  2,
+		EmbedBatchSize:  64,
+		WorkerHeartbeat: time.Second,
 	}
+	return workerDeps{Config: cfg, Store: store, Ingest: ingestor}, service
 }
 
 func TestWorkerCommandDrainsQueue(t *testing.T) {
 	ctx := context.Background()
-	runtime := testRuntime(t)
-	job, _, err := runtime.Jobs.Enqueue(ctx, runtime.Config.DocumentRoot)
+	deps, service := testWorkerDeps(t)
+	job, _, err := service.Enqueue(ctx, deps.Config.DocumentRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
 	runCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	if err := Run(runCtx, []string{"worker", "--once"}, os.Stdout, &stderr, runtime); err != nil {
+	if err := runWorker(runCtx, deps, true, &stderr); err != nil {
 		t.Fatalf("worker run: %v\n%s", err, stderr.String())
 	}
-	status, err := runtime.Jobs.Status(ctx, job.ID, 1)
+	status, err := service.Status(ctx, job.ID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,9 +128,9 @@ func TestStatusCommandPrintsJobs(t *testing.T) {
 	defer server.Close()
 	go func() { _ = server.Serve(ctx) }()
 
-	runtime := Runtime{Config: config.Config{DatabasePath: ":memory:"}}
+	deps := statusDeps{Config: config.Config{DatabasePath: ":memory:"}}
 	var stdout, stderr bytes.Buffer
-	if err := Run(ctx, []string{"status"}, &stdout, &stderr, runtime); err != nil {
+	if err := runStatus(ctx, deps, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("status: %v\n%s", err, stderr.String())
 	}
 	output := stdout.String()
@@ -185,21 +178,52 @@ func TestRenderStatusShowsActiveFilesAndFailures(t *testing.T) {
 	}
 }
 
-func TestUsageForInvalidCommand(t *testing.T) {
-	runtime := testRuntime(t)
-	var stderr bytes.Buffer
-	if err := Run(context.Background(), []string{"bogus"}, os.Stdout, &stderr, runtime); err == nil {
-		t.Fatal("expected invalid command to fail")
+func TestParseCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    string
+		wantErr bool
+	}{
+		{name: "serve", args: []string{"serve"}, want: "serve"},
+		{name: "worker", args: []string{"worker"}, want: "worker"},
+		{name: "worker once", args: []string{"worker", "--once"}, want: "worker"},
+		{name: "status", args: []string{"status"}, want: "status"},
+		{name: "status job", args: []string{"status", "abc"}, want: "status"},
+		{name: "missing", args: nil, wantErr: true},
+		{name: "unknown", args: []string{"bogus"}, wantErr: true},
+		{name: "serve extra", args: []string{"serve", "x"}, wantErr: true},
+		{name: "worker extra", args: []string{"worker", "x"}, wantErr: true},
 	}
-	if stderr.Len() == 0 {
-		t.Fatal("expected usage output")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			cmd, err := parseCommand(test.args, &stderr)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				if stderr.Len() == 0 {
+					t.Fatal("expected usage output")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cmd.name != test.want {
+				t.Fatalf("command = %q, want %q", cmd.name, test.want)
+			}
+		})
 	}
 }
 
-func TestWorkerRejectsExtraArguments(t *testing.T) {
-	runtime := testRuntime(t)
-	var stderr bytes.Buffer
-	if err := Run(context.Background(), []string{"worker", "extra"}, os.Stdout, &stderr, runtime); err == nil {
-		t.Fatal("expected extra arguments to fail")
+func TestParseWorkerOnce(t *testing.T) {
+	cmd, err := parseCommand([]string{"worker", "--once"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cmd.once {
+		t.Fatal("expected --once to be set")
 	}
 }

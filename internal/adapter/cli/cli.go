@@ -15,77 +15,77 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/nicolasmmb/pinax/internal/adapter/ipc"
 	mcpadapter "github.com/nicolasmmb/pinax/internal/adapter/mcp"
-	"github.com/nicolasmmb/pinax/internal/adapter/turso"
 	"github.com/nicolasmmb/pinax/internal/app/ingest"
 	"github.com/nicolasmmb/pinax/internal/app/jobs"
 	"github.com/nicolasmmb/pinax/internal/app/query"
 	"github.com/nicolasmmb/pinax/internal/config"
 )
 
-type Runtime struct {
-	Config    config.Config
-	Ingest    *ingest.Service
-	Query     *query.Service
-	Jobs      *jobs.Service
-	Store     *turso.Store
-	Embedder  embedder
-	Validator *ingest.Validator
+type command struct {
+	name       string
+	once       bool
+	statusArgs []string
 }
 
-func Run(ctx context.Context, args []string, stdout, stderr io.Writer, runtime Runtime) error {
+func parseCommand(args []string, stderr io.Writer) (command, error) {
 	if len(args) == 0 {
-		return usage(stderr)
+		return command{}, usage(stderr)
 	}
-	logger := newLogger(stderr, runtime.Config.LogLevel)
 	switch args[0] {
 	case "serve":
 		if len(args) != 1 {
-			return usage(stderr)
+			return command{}, usage(stderr)
 		}
-		socketPath := ipc.SocketPath(runtime.Config.DatabasePath)
-		if runtime.Config.WorkerAutostart {
-			stop := startWorkerSupervisor(ctx, socketPath, stderr, logger)
-			defer stop()
-		}
-		timeout := 5 * time.Second
-		if runtime.Config.WorkerAutostart {
-			timeout = 15 * time.Second
-		}
-		client, err := ipc.DialWithRetry(ctx, socketPath, timeout)
-		if err != nil {
-			return fmt.Errorf("connect to ingest worker: %w (start `pinax worker` or enable PINAX_WORKER_AUTOSTART)", err)
-		}
-		defer client.Close()
-		version, size, overlap := ingest.ChunkerDefaults()
-		jobService := jobs.NewService(client, runtime.Validator, jobs.SnapshotConfig{
-			EmbeddingModel: runtime.Embedder.Model(),
-			ChunkerVersion: version,
-			ChunkSize:      size,
-			ChunkOverlap:   overlap,
-		})
-		queryService := query.New(runtime.Embedder, client)
-		server := mcpadapter.NewServer(jobService, queryService)
-		return server.Run(ctx, &mcp.StdioTransport{})
+		return command{name: "serve"}, nil
 	case "worker":
 		flags := flag.NewFlagSet("worker", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		once := flags.Bool("once", false, "process the queue and exit when it is empty")
 		if err := flags.Parse(args[1:]); err != nil {
-			return err
+			return command{}, err
 		}
 		if flags.NArg() != 0 {
-			return usage(stderr)
+			return command{}, usage(stderr)
 		}
-		return runWorker(ctx, runtime, *once, logger)
+		return command{name: "worker", once: *once}, nil
 	case "status":
-		return runStatus(ctx, args[1:], stdout, stderr, runtime)
+		return command{name: "status", statusArgs: args[1:]}, nil
 	default:
-		return usage(stderr)
+		return command{}, usage(stderr)
 	}
 }
 
-func runWorker(ctx context.Context, runtime Runtime, once bool, logger *slog.Logger) error {
-	ipcServer, err := ipc.Listen(ipc.SocketPath(runtime.Config.DatabasePath), runtime.Store, runtime.Store, logger)
+func runServe(ctx context.Context, deps serveDeps, stderr io.Writer) error {
+	logger := newLogger(stderr, deps.Config.LogLevel)
+	socketPath := ipc.SocketPath(deps.Config.DatabasePath)
+	if deps.Config.WorkerAutostart {
+		stop := startWorkerSupervisor(ctx, socketPath, stderr, logger)
+		defer stop()
+	}
+	timeout := 5 * time.Second
+	if deps.Config.WorkerAutostart {
+		timeout = 15 * time.Second
+	}
+	client, err := ipc.DialWithRetry(ctx, socketPath, timeout)
+	if err != nil {
+		return fmt.Errorf("connect to ingest worker: %w (start `pinax worker` or enable PINAX_WORKER_AUTOSTART)", err)
+	}
+	defer client.Close()
+	version, size, overlap := ingest.ChunkerDefaults()
+	jobService := jobs.NewService(client, deps.Validator, jobs.SnapshotConfig{
+		EmbeddingModel: deps.Embedder.Model(),
+		ChunkerVersion: version,
+		ChunkSize:      size,
+		ChunkOverlap:   overlap,
+	})
+	queryService := query.New(deps.Embedder, client)
+	server := mcpadapter.NewServer(jobService, queryService)
+	return server.Run(ctx, &mcp.StdioTransport{})
+}
+
+func runWorker(ctx context.Context, deps workerDeps, once bool, stderr io.Writer) error {
+	logger := newLogger(stderr, deps.Config.LogLevel)
+	ipcServer, err := ipc.Listen(ipc.SocketPath(deps.Config.DatabasePath), deps.Store, deps.Store, logger)
 	if err != nil {
 		return err
 	}
@@ -95,14 +95,14 @@ func runWorker(ctx context.Context, runtime Runtime, once bool, logger *slog.Log
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- ipcServer.Serve(workerCtx) }()
 
-	heartbeat := runtime.Config.WorkerHeartbeat
+	heartbeat := deps.Config.WorkerHeartbeat
 	jobStaleAfter := max(6*heartbeat, 30*time.Second)
-	worker, err := jobs.NewWorker(runtime.Store, runtime.Ingest, jobs.WorkerConfig{
-		Workers:       runtime.Config.IngestWorkers,
-		JobSlots:      runtime.Config.WorkerJobSlots,
+	worker, err := jobs.NewWorker(deps.Store, deps.Ingest, jobs.WorkerConfig{
+		Workers:       deps.Config.IngestWorkers,
+		JobSlots:      deps.Config.WorkerJobSlots,
 		Heartbeat:     heartbeat,
 		JobStaleAfter: jobStaleAfter,
-		Retention:     time.Duration(runtime.Config.JobRetentionDays) * 24 * time.Hour,
+		Retention:     time.Duration(deps.Config.JobRetentionDays) * 24 * time.Hour,
 		Once:          once,
 		Logger:        logger,
 	})
@@ -140,39 +140,39 @@ func newLogger(stderr io.Writer, level string) *slog.Logger {
 func Main() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if len(os.Args) < 2 {
-		_ = usage(os.Stderr)
-		return 2
-	}
-	switch os.Args[1] {
-	case "serve", "worker", "status":
-	default:
-		_ = usage(os.Stderr)
-		return 2
+	cmd, err := parseCommand(os.Args[1:], os.Stderr)
+	if err != nil {
+		return reportError(os.Stderr, err)
 	}
 	cfg, err := config.Load()
 	if err != nil {
 		return reportError(os.Stderr, err)
 	}
-	var (
-		runtime      Runtime
-		closeRuntime func()
-	)
-	switch os.Args[1] {
+	switch cmd.name {
 	case "worker":
-		runtime, closeRuntime, err = newWorkerRuntime(ctx, cfg)
+		deps, closeDeps, err := newWorkerDeps(ctx, cfg)
+		if err != nil {
+			return reportError(os.Stderr, err)
+		}
+		defer closeDeps()
+		err = runWorker(ctx, deps, cmd.once, os.Stderr)
+		if err != nil {
+			return reportError(os.Stderr, err)
+		}
 	case "status":
-		runtime, closeRuntime, err = newStatusRuntime(cfg)
+		err = runStatus(ctx, statusDeps{Config: cfg}, cmd.statusArgs, os.Stdout, os.Stderr)
+		if err != nil {
+			return reportError(os.Stderr, err)
+		}
 	default:
-		runtime, closeRuntime, err = newServeRuntime(cfg)
-	}
-	if err != nil {
-		return reportError(os.Stderr, err)
-	}
-	defer closeRuntime()
-	err = Run(ctx, os.Args[1:], os.Stdout, os.Stderr, runtime)
-	if err != nil {
-		return reportError(os.Stderr, err)
+		deps, err := newServeDeps(cfg)
+		if err != nil {
+			return reportError(os.Stderr, err)
+		}
+		err = runServe(ctx, deps, os.Stderr)
+		if err != nil {
+			return reportError(os.Stderr, err)
+		}
 	}
 	return 0
 }

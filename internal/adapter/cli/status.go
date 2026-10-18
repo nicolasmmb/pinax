@@ -12,7 +12,7 @@ import (
 	"github.com/nicolasmmb/pinax/internal/domain"
 )
 
-func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer, runtime Runtime) error {
+func runStatus(ctx context.Context, deps statusDeps, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var watch bool
@@ -31,7 +31,7 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer, run
 	}
 	jobID := flags.Arg(0)
 
-	client, err := ipc.DialWithRetry(ctx, ipc.SocketPath(runtime.Config.DatabasePath), 2*time.Second)
+	client, err := ipc.DialWithRetry(ctx, ipc.SocketPath(deps.Config.DatabasePath), 2*time.Second)
 	if err != nil {
 		return fmt.Errorf("worker offline: %w (start `pinax worker` or `pinax serve`)", err)
 	}
