@@ -31,7 +31,7 @@ type Repository interface {
 	RequeueJobFile(context.Context, string, string) error
 	CancelQueuedFiles(context.Context, string) error
 	ClaimNextJob(context.Context, string, time.Time) (*domain.Job, error)
-	HeartbeatJob(context.Context, string, string, time.Time) error
+	HeartbeatJobs(context.Context, []string, string, time.Time) error
 	RecoverStaleJobs(context.Context, time.Time, time.Duration) (int, error)
 	RequeueJob(context.Context, string, string) error
 	FinalizeJob(context.Context, string) (domain.Job, bool, error)
@@ -39,10 +39,8 @@ type Repository interface {
 	RequestCancel(context.Context, string) (domain.Job, error)
 	CancelRequested(context.Context, string) (bool, error)
 	PurgeJobs(context.Context, time.Time) (int, error)
-	AcquireLease(context.Context, domain.WorkerLease, time.Duration) (bool, error)
-	RenewLease(context.Context, string, string, time.Time) (bool, error)
-	ReleaseLease(context.Context, string, string) error
-	Lease(context.Context) (*domain.WorkerLease, error)
+	TouchWorker(context.Context, domain.WorkerInfo) error
+	ClearWorker(context.Context) error
 }
 
 type Ingester interface {

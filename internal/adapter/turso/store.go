@@ -155,8 +155,8 @@ CREATE TABLE IF NOT EXISTS ingest_job_files (
   finished_at TEXT,
   PRIMARY KEY (job_id, path)
 );
-CREATE TABLE IF NOT EXISTS worker_leases (
-  name TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS worker_heartbeat (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
   worker_id TEXT NOT NULL,
   pid INTEGER NOT NULL,
   hostname TEXT NOT NULL,

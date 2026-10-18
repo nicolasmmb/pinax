@@ -17,13 +17,13 @@ func (s *Store) Status(ctx context.Context, jobID string, limit int) (domain.Sta
 		limit = 50
 	}
 	result := domain.StatusResult{Jobs: []domain.JobSnapshot{}}
-	lease, err := s.Lease(ctx)
+	info, err := s.WorkerInfo(ctx)
 	if err != nil {
 		return domain.StatusResult{}, err
 	}
-	if lease != nil {
-		result.Worker = domain.WorkerStatus{WorkerLease: *lease, Online: true}
-		if time.Since(lease.HeartbeatAt) > workerOnlineWindow {
+	if info != nil {
+		result.Worker = domain.WorkerStatus{WorkerInfo: *info, Online: true}
+		if time.Since(info.HeartbeatAt) > workerOnlineWindow {
 			result.Worker.Online = false
 			result.Worker.Stale = true
 		}

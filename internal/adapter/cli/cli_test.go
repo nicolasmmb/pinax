@@ -149,7 +149,7 @@ func TestStatusCommandPrintsJobs(t *testing.T) {
 func TestRenderStatusShowsActiveFilesAndFailures(t *testing.T) {
 	status := domain.StatusResult{
 		Worker: domain.WorkerStatus{
-			WorkerLease: domain.WorkerLease{
+			WorkerInfo: domain.WorkerInfo{
 				WorkerID:    "worker-1",
 				PID:         42,
 				HeartbeatAt: time.Now(),

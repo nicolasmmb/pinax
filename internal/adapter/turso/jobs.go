@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nicolasmmb/pinax/internal/app/jobs"
@@ -745,71 +746,70 @@ WHERE status NOT IN ('queued','running') AND finished_at IS NOT NULL AND finishe
 	return int(affected), nil
 }
 
-func (s *Store) AcquireLease(ctx context.Context, lease domain.WorkerLease, ttl time.Duration) (bool, error) {
-	expiredBefore := formatTime(lease.HeartbeatAt.Add(-ttl))
-	_, err := s.db.ExecContext(ctx, `INSERT INTO worker_leases(
-name, worker_id, pid, hostname, started_at, heartbeat_at)
-VALUES('ingest', ?, ?, ?, ?, ?)
-ON CONFLICT(name) DO UPDATE SET
+func (s *Store) TouchWorker(ctx context.Context, info domain.WorkerInfo) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO worker_heartbeat(
+id, worker_id, pid, hostname, started_at, heartbeat_at)
+VALUES(1, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
 worker_id = excluded.worker_id,
 pid = excluded.pid,
 hostname = excluded.hostname,
 started_at = excluded.started_at,
-heartbeat_at = excluded.heartbeat_at
-WHERE worker_leases.heartbeat_at < ?`,
-		lease.WorkerID, lease.PID, lease.Hostname,
-		formatTime(lease.StartedAt), formatTime(lease.HeartbeatAt), expiredBefore)
+heartbeat_at = excluded.heartbeat_at`,
+		info.WorkerID, info.PID, info.Hostname,
+		formatTime(info.StartedAt), formatTime(info.HeartbeatAt))
 	if err != nil {
-		return false, fmt.Errorf("acquire worker lease: %w", err)
-	}
-	current, err := s.Lease(ctx)
-	if err != nil {
-		return false, err
-	}
-	return current != nil && current.WorkerID == lease.WorkerID, nil
-}
-
-func (s *Store) RenewLease(ctx context.Context, name, workerID string, now time.Time) (bool, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE worker_leases SET heartbeat_at = ?
-WHERE name = ? AND worker_id = ?`, formatTime(now), name, workerID)
-	if err != nil {
-		return false, fmt.Errorf("renew worker lease: %w", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return affected == 1, nil
-}
-
-func (s *Store) ReleaseLease(ctx context.Context, name, workerID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM worker_leases WHERE name = ? AND worker_id = ?`, name, workerID)
-	if err != nil {
-		return fmt.Errorf("release worker lease: %w", err)
+		return fmt.Errorf("touch worker heartbeat: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) Lease(ctx context.Context) (*domain.WorkerLease, error) {
+func (s *Store) ClearWorker(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM worker_heartbeat WHERE id = 1`); err != nil {
+		return fmt.Errorf("clear worker heartbeat: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) WorkerInfo(ctx context.Context) (*domain.WorkerInfo, error) {
 	var (
-		lease       domain.WorkerLease
+		info        domain.WorkerInfo
 		startedAt   string
 		heartbeatAt string
 	)
-	err := s.db.QueryRowContext(ctx, `SELECT name, worker_id, pid, hostname, started_at, heartbeat_at
-FROM worker_leases WHERE name = 'ingest'`).Scan(
-		&lease.Name, &lease.WorkerID, &lease.PID, &lease.Hostname, &startedAt, &heartbeatAt)
+	err := s.db.QueryRowContext(ctx, `SELECT worker_id, pid, hostname, started_at, heartbeat_at
+FROM worker_heartbeat WHERE id = 1`).Scan(
+		&info.WorkerID, &info.PID, &info.Hostname, &startedAt, &heartbeatAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get worker lease: %w", err)
+		return nil, fmt.Errorf("get worker heartbeat: %w", err)
 	}
-	if lease.StartedAt, err = parseTime(startedAt); err != nil {
+	if info.StartedAt, err = parseTime(startedAt); err != nil {
 		return nil, err
 	}
-	if lease.HeartbeatAt, err = parseTime(heartbeatAt); err != nil {
+	if info.HeartbeatAt, err = parseTime(heartbeatAt); err != nil {
 		return nil, err
 	}
-	return &lease, nil
+	return &info, nil
+}
+
+func (s *Store) HeartbeatJobs(ctx context.Context, ids []string, workerID string, now time.Time) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+2)
+	args = append(args, formatTime(now))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	args = append(args, workerID)
+	query := `UPDATE ingest_jobs SET heartbeat_at = ? WHERE id IN (` + strings.Join(placeholders, ",") + `) AND worker_id = ?`
+	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("heartbeat jobs: %w", err)
+	}
+	return nil
 }

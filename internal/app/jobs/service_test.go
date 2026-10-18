@@ -93,9 +93,9 @@ func TestServiceWorkerOnline(t *testing.T) {
 		ChunkOverlap:   150,
 	})
 	now := time.Now().UTC()
-	lease := domain.WorkerLease{Name: "ingest", WorkerID: "worker", PID: 42, Hostname: "host", StartedAt: now, HeartbeatAt: now}
-	if acquired, err := store.AcquireLease(ctx, lease, 30*time.Second); err != nil || !acquired {
-		t.Fatalf("acquire lease = %v, %v", acquired, err)
+	info := domain.WorkerInfo{WorkerID: "worker", PID: 42, Hostname: "host", StartedAt: now, HeartbeatAt: now}
+	if err := store.TouchWorker(ctx, info); err != nil {
+		t.Fatalf("touch worker = %v", err)
 	}
 	status, err := service.Status(ctx, "", 10)
 	if err != nil {

@@ -167,27 +167,23 @@ func TestClaimIsExclusive(t *testing.T) {
 	}
 }
 
-func TestLeaseAndStaleRecovery(t *testing.T) {
+func TestWorkerHeartbeatAndStaleRecovery(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	now := time.Now().UTC()
-	first := domain.WorkerLease{Name: "ingest", WorkerID: "worker-a", PID: 1, Hostname: "host", StartedAt: now, HeartbeatAt: now}
-	acquired, err := store.AcquireLease(ctx, first, 30*time.Second)
-	if err != nil || !acquired {
-		t.Fatalf("first lease = %v, %v", acquired, err)
-	}
-	second := domain.WorkerLease{Name: "ingest", WorkerID: "worker-b", PID: 2, Hostname: "host", StartedAt: now, HeartbeatAt: now}
-	if acquired, err := store.AcquireLease(ctx, second, 30*time.Second); err != nil || acquired {
-		t.Fatalf("second lease should fail: %v, %v", acquired, err)
-	}
-	if renewed, err := store.RenewLease(ctx, "ingest", "worker-a", now.Add(time.Second)); err != nil || !renewed {
-		t.Fatalf("renew = %v, %v", renewed, err)
-	}
-	if err := store.ReleaseLease(ctx, "ingest", "worker-a"); err != nil {
+	info := domain.WorkerInfo{WorkerID: "worker-a", PID: 1, Hostname: "host", StartedAt: now, HeartbeatAt: now}
+	if err := store.TouchWorker(ctx, info); err != nil {
 		t.Fatal(err)
 	}
-	if acquired, err := store.AcquireLease(ctx, second, 30*time.Second); err != nil || !acquired {
-		t.Fatalf("second lease after release = %v, %v", acquired, err)
+	stored, err := store.WorkerInfo(ctx)
+	if err != nil || stored == nil || stored.WorkerID != "worker-a" {
+		t.Fatalf("worker info = %#v, %v", stored, err)
+	}
+	if err := store.ClearWorker(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if stored, err := store.WorkerInfo(ctx); err != nil || stored != nil {
+		t.Fatalf("worker info after clear = %#v, %v", stored, err)
 	}
 
 	job := enqueueTestJob(t, store, "/docs", domain.InputDir)

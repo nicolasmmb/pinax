@@ -153,8 +153,7 @@ type JobSnapshot struct {
 	FailuresTruncated bool        `json:"failures_truncated"`
 }
 
-type WorkerLease struct {
-	Name        string
+type WorkerInfo struct {
 	WorkerID    string
 	PID         int
 	Hostname    string
@@ -163,7 +162,7 @@ type WorkerLease struct {
 }
 
 type WorkerStatus struct {
-	WorkerLease
+	WorkerInfo
 	Online bool `json:"online"`
 	Stale  bool `json:"stale"`
 }

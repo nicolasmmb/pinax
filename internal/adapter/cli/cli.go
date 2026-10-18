@@ -96,13 +96,12 @@ func runWorker(ctx context.Context, runtime Runtime, once bool, logger *slog.Log
 	go func() { serverErr <- ipcServer.Serve(workerCtx) }()
 
 	heartbeat := runtime.Config.WorkerHeartbeat
-	leaseTTL := max(6*heartbeat, 30*time.Second)
+	jobStaleAfter := max(6*heartbeat, 30*time.Second)
 	worker, err := jobs.NewWorker(runtime.Store, runtime.Ingest, jobs.WorkerConfig{
 		Workers:       runtime.Config.IngestWorkers,
 		JobSlots:      runtime.Config.WorkerJobSlots,
 		Heartbeat:     heartbeat,
-		JobStaleAfter: leaseTTL,
-		LeaseTTL:      leaseTTL,
+		JobStaleAfter: jobStaleAfter,
 		Retention:     time.Duration(runtime.Config.JobRetentionDays) * 24 * time.Hour,
 		Once:          once,
 		Logger:        logger,

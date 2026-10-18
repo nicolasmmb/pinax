@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,15 +15,12 @@ import (
 	"github.com/nicolasmmb/pinax/internal/domain"
 )
 
-const leaseName = "ingest"
-
 type WorkerConfig struct {
 	WorkerID      string
 	Workers       int
 	JobSlots      int
 	Heartbeat     time.Duration
 	JobStaleAfter time.Duration
-	LeaseTTL      time.Duration
 	Retention     time.Duration
 	Once          bool
 	Logger        *slog.Logger
@@ -42,9 +38,6 @@ func (c WorkerConfig) withDefaults() WorkerConfig {
 	}
 	if c.JobStaleAfter <= 0 {
 		c.JobStaleAfter = 30 * time.Second
-	}
-	if c.LeaseTTL <= 0 {
-		c.LeaseTTL = 30 * time.Second
 	}
 	if c.Logger == nil {
 		c.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -76,6 +69,7 @@ type Worker struct {
 	name     string
 	hostname string
 	pid      int
+	started  time.Time
 
 	mu      sync.RWMutex
 	active  map[string]*jobRuntime
@@ -107,6 +101,7 @@ func NewWorker(repo Repository, ingester Ingester, cfg WorkerConfig) (*Worker, e
 		name:     id,
 		hostname: hostname,
 		pid:      os.Getpid(),
+		started:  time.Now().UTC(),
 		active:   make(map[string]*jobRuntime),
 		tasks:    make(chan fileTask, cfg.Workers*4),
 		outcomes: make(chan fileOutcome, cfg.Workers*4),
@@ -115,25 +110,13 @@ func NewWorker(repo Repository, ingester Ingester, cfg WorkerConfig) (*Worker, e
 
 func (w *Worker) WorkerID() string { return w.name }
 
-var errLeaseLost = errors.New("worker lease lost")
-
 func (w *Worker) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	if err := w.acquire(runCtx); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil
-		}
+	if err := w.touch(); err != nil {
 		return err
 	}
-	defer func() {
-		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer releaseCancel()
-		if err := w.repo.ReleaseLease(releaseCtx, leaseName, w.name); err != nil {
-			w.log.Warn("release worker lease", "error", err)
-		}
-	}()
 	w.log.Info("worker started", "worker_id", w.name, "workers", w.cfg.Workers, "job_slots", w.cfg.JobSlots)
 
 	if recovered, err := w.repo.RecoverStaleJobs(runCtx, time.Now().UTC(), w.cfg.JobStaleAfter); err != nil {
@@ -162,40 +145,27 @@ func (w *Worker) Run(ctx context.Context) error {
 	background.Wait()
 	w.feeders.Wait()
 	w.requeueActive()
-	if errors.Is(err, errLeaseLost) {
-		return nil
+	clearCtx, clearCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer clearCancel()
+	if err := w.repo.ClearWorker(clearCtx); err != nil {
+		w.log.Warn("clear worker heartbeat", "error", err)
 	}
 	return err
 }
 
-func (w *Worker) acquire(ctx context.Context) error {
-	attempt := 0
-	for {
-		now := time.Now().UTC()
-		lease := domain.WorkerLease{
-			Name:        leaseName,
-			WorkerID:    w.name,
-			PID:         w.pid,
-			Hostname:    w.hostname,
-			StartedAt:   now,
-			HeartbeatAt: now,
-		}
-		acquired, err := w.repo.AcquireLease(ctx, lease, w.cfg.LeaseTTL)
-		if err != nil {
-			return fmt.Errorf("acquire worker lease: %w", err)
-		}
-		if acquired {
-			return nil
-		}
-		if attempt == 0 {
-			w.log.Info("another worker holds the lease, standing by", "worker_id", w.name)
-		}
-		attempt++
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
+func (w *Worker) touch() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return w.repo.TouchWorker(ctx, w.info())
+}
+
+func (w *Worker) info() domain.WorkerInfo {
+	return domain.WorkerInfo{
+		WorkerID:    w.name,
+		PID:         w.pid,
+		Hostname:    w.hostname,
+		StartedAt:   w.started,
+		HeartbeatAt: time.Now().UTC(),
 	}
 }
 
@@ -209,28 +179,22 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc) {
 		case <-ticker.C:
 		}
 		now := time.Now().UTC()
-		renewed, err := w.repo.RenewLease(ctx, leaseName, w.name, now)
-		if err != nil {
+		if err := w.repo.TouchWorker(ctx, w.info()); err != nil {
 			if ctx.Err() == nil {
-				w.log.Warn("renew worker lease", "error", err)
+				w.log.Warn("touch worker heartbeat", "error", err)
 			}
 			continue
 		}
-		if !renewed {
-			w.log.Warn("worker lease lost, stopping", "worker_id", w.name)
-			cancel()
-			return
+		runtimes := w.runtimes()
+		if len(runtimes) == 0 {
+			continue
 		}
-		for _, rt := range w.runtimes() {
-			err := w.repo.HeartbeatJob(ctx, rt.job.ID, w.name, now)
-			if errors.Is(err, ErrJobNotOwned) {
-				w.log.Warn("job no longer owned by this worker", "job_id", rt.job.ID)
-				rt.cancel()
-				continue
-			}
-			if err != nil && ctx.Err() == nil {
-				w.log.Warn("heartbeat job", "job_id", rt.job.ID, "error", err)
-			}
+		ids := make([]string, 0, len(runtimes))
+		for _, rt := range runtimes {
+			ids = append(ids, rt.job.ID)
+		}
+		if err := w.repo.HeartbeatJobs(ctx, ids, w.name, now); err != nil && ctx.Err() == nil {
+			w.log.Warn("heartbeat jobs", "error", err)
 		}
 	}
 }
