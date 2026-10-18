@@ -33,7 +33,7 @@ type Repository interface {
 	ClaimNextJob(context.Context, string, time.Time) (*domain.Job, error)
 	HeartbeatJob(context.Context, string, string, time.Time) error
 	RecoverStaleJobs(context.Context, time.Time, time.Duration) (int, error)
-	RequeueJob(context.Context, string) error
+	RequeueJob(context.Context, string, string) error
 	FinalizeJob(context.Context, string) (domain.Job, bool, error)
 	FailJob(context.Context, string, string) error
 	RequestCancel(context.Context, string) (domain.Job, error)

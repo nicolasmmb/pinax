@@ -474,7 +474,7 @@ WHERE job_id = ? AND path = ? AND status = 'running'`, id, path)
 func (s *Store) CancelQueuedFiles(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE ingest_job_files
 SET status = 'canceled', stage = NULL, finished_at = ?
-WHERE job_id = ? AND status IN ('queued','running')`,
+WHERE job_id = ? AND status = 'queued'`,
 		formatTime(time.Now().UTC()), id)
 	if err != nil {
 		return fmt.Errorf("cancel queued files: %w", err)
@@ -581,16 +581,24 @@ WHERE job_id = ? AND status = 'running'`, id); err != nil {
 	return len(ids), nil
 }
 
-func (s *Store) RequeueJob(ctx context.Context, id string) error {
+func (s *Store) RequeueJob(ctx context.Context, id, workerID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE ingest_jobs
+	result, err := tx.ExecContext(ctx, `UPDATE ingest_jobs
 SET status = 'queued', worker_id = NULL, heartbeat_at = NULL
-WHERE id = ? AND status = 'running'`, id); err != nil {
+WHERE id = ? AND status = 'running' AND worker_id = ?`, id, workerID)
+	if err != nil {
 		return fmt.Errorf("requeue job: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE ingest_job_files
 SET status = 'queued', stage = NULL, started_at = NULL

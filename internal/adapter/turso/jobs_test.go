@@ -259,7 +259,7 @@ func TestRequeueAndPurge(t *testing.T) {
 	if _, err := store.StartJobFile(ctx, job.ID, "/docs/a.md"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RequeueJob(ctx, job.ID); err != nil {
+	if err := store.RequeueJob(ctx, job.ID, "worker"); err != nil {
 		t.Fatal(err)
 	}
 	requeued, err := store.GetJob(ctx, job.ID)
