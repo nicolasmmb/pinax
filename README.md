@@ -284,10 +284,10 @@ cp .example.env .env
 # exporte CGO_CFLAGS e CGO_LDFLAGS (Passo 2)
 go build -o bin/pinax ./cmd/pinax
 ollama serve &
-bin/pinax serve
+bin/pinax worker
 ```
 
-Outro terminal:
+Em outro terminal, use a CLI para enfileirar e acompanhar. O cliente MCP inicia `serve` separadamente, quando necessário.
 
 ```sh
 bin/pinax index documents
@@ -310,7 +310,7 @@ set -a; . ./.env; set +a
 exec bin/pinax worker --once
 ```
 
-Enfileire antes com `bin/pinax index` ou mantenha um `serve`/`worker` contínuo e use `--once` só para drenar.
+Enfileire com `bin/pinax index` e mantenha `bin/pinax worker` rodando para processar a fila. Use `worker --once` para drenar jobs e encerrar; o `serve` é necessário apenas para disponibilizar as ferramentas MCP.
 
 ---
 
