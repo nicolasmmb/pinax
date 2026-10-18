@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nicolasmmb/pinax/internal/app/ingest"
@@ -16,24 +18,68 @@ import (
 	_ "turso.tech/database/tursogo"
 )
 
+const (
+	defaultMaxOpenConns = 8
+	defaultBusyTimeout  = 10 * time.Second
+)
+
+type Options struct {
+	Path         string
+	MaxOpenConns int
+	BusyTimeout  time.Duration
+}
+
 type Store struct {
 	db *sql.DB
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
-	if path != ":memory:" {
+	return OpenWithOptions(ctx, Options{Path: path})
+}
+
+func OpenWithOptions(ctx context.Context, opts Options) (*Store, error) {
+	path := opts.Path
+	inMemory := strings.HasPrefix(path, ":memory:")
+	if !inMemory {
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			return nil, fmt.Errorf("create database directory: %w", err)
 		}
 	}
-	db, err := sql.Open("turso", path)
+	maxConns := opts.MaxOpenConns
+	if maxConns <= 0 {
+		maxConns = defaultMaxOpenConns
+	}
+	if inMemory {
+		maxConns = 1
+	}
+	busyTimeout := opts.BusyTimeout
+	if busyTimeout <= 0 {
+		busyTimeout = defaultBusyTimeout
+	}
+	dsn := path
+	if !inMemory {
+		separator := "?"
+		if strings.Contains(dsn, "?") {
+			separator = "&"
+		}
+		dsn += separator + "_busy_timeout=" + strconv.FormatInt(busyTimeout.Milliseconds(), 10)
+	}
+	db, err := sql.Open("turso", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open Turso database: %w", err)
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(maxConns)
+	db.SetMaxIdleConns(maxConns)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("connect to Turso database: %w", err)
+	}
+	if !inMemory {
+		var mode string
+		if err := db.QueryRowContext(ctx, "PRAGMA journal_mode = WAL").Scan(&mode); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("enable Turso WAL: %w", err)
+		}
 	}
 	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
 		db.Close()
