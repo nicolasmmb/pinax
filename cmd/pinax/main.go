@@ -28,7 +28,7 @@ func Main() int {
 		return reportError(os.Stderr, err)
 	}
 	switch cmd.Name {
-	case "worker":
+	case cli.Worker:
 		deps, closeDeps, err := newWorkerDeps(ctx, cfg)
 		if err == nil {
 			defer closeDeps()
@@ -37,12 +37,12 @@ func Main() int {
 		if err != nil {
 			return reportError(os.Stderr, err)
 		}
-	case "status":
+	case cli.Status:
 		opts := statusOptions{jobID: cmd.StatusJob, watch: cmd.Watch, limit: cmd.Limit}
 		if err := runStatus(ctx, cfg, opts, os.Stdout); err != nil {
 			return reportError(os.Stderr, err)
 		}
-	case "index":
+	case cli.Index:
 		deps, err := newIndexDeps(cfg)
 		if err == nil {
 			err = runIndex(ctx, deps, cmd.IndexPath, os.Stdout)
@@ -50,7 +50,7 @@ func Main() int {
 		if err != nil {
 			return reportError(os.Stderr, err)
 		}
-	case "serve":
+	case cli.Serve:
 		deps, err := newMCPDeps(cfg)
 		if err == nil {
 			err = runServe(ctx, deps)

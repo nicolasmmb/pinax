@@ -7,6 +7,7 @@ Na branch `feature/cli-command-separation`, separar o parsing da CLI da montagem
 ## Mudanças
 
 - Deixar `internal/adapter/cli` responsável somente por interpretar argumentos, validar uso e selecionar o comando.
+- Representar os nomes dos comandos com tipo e constantes, usando as constantes no despacho.
 - Mover a composição e execução dos comandos para a entrada do programa, em arquivos separados para `serve`, `worker`, `index` e `status`.
 - Fazer `serve` iniciar apenas o MCP e permitir que ele suba sem worker; as ferramentas dependentes do worker informam quando ele estiver offline.
 - Manter `index` validando o caminho e criando o job. O worker continua lendo arquivos, gerando embeddings e gravando os registros.

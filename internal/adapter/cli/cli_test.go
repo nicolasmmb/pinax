@@ -9,13 +9,13 @@ import (
 func TestParseCommands(t *testing.T) {
 	tests := []struct {
 		args    []string
-		name    string
+		name    Name
 		wantErr bool
 	}{
-		{args: []string{"serve"}, name: "serve"},
-		{args: []string{"worker", "--once"}, name: "worker"},
-		{args: []string{"status", "--watch", "--limit", "4", "abc"}, name: "status"},
-		{args: []string{"index", "/docs"}, name: "index"},
+		{args: []string{"serve"}, name: Serve},
+		{args: []string{"worker", "--once"}, name: Worker},
+		{args: []string{"status", "--watch", "--limit", "4", "abc"}, name: Status},
+		{args: []string{"index", "/docs"}, name: Index},
 		{args: []string{"index"}, wantErr: true},
 		{args: []string{"serve", "extra"}, wantErr: true},
 		{args: []string{"worker", "extra"}, wantErr: true},
@@ -48,5 +48,15 @@ func TestParseStatusOptions(t *testing.T) {
 	}
 	if cmd.StatusJob != "abc" || !cmd.Watch || cmd.Limit != 4 {
 		t.Fatalf("status command = %#v", cmd)
+	}
+}
+
+func TestParseWorkerOnce(t *testing.T) {
+	cmd, err := Parse([]string{"worker", "--once"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Name != Worker || !cmd.Once {
+		t.Fatalf("worker command = %#v", cmd)
 	}
 }

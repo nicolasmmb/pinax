@@ -6,8 +6,17 @@ import (
 	"io"
 )
 
+type Name string
+
+const (
+	Serve  Name = "serve"
+	Worker Name = "worker"
+	Status Name = "status"
+	Index  Name = "index"
+)
+
 type Command struct {
-	Name      string
+	Name      Name
 	Once      bool
 	StatusJob string
 	Watch     bool
@@ -19,13 +28,13 @@ func Parse(args []string, stderr io.Writer) (Command, error) {
 	if len(args) == 0 {
 		return Command{}, usage(stderr)
 	}
-	switch args[0] {
-	case "serve":
+	switch Name(args[0]) {
+	case Serve:
 		if len(args) != 1 {
 			return Command{}, usage(stderr)
 		}
-		return Command{Name: "serve"}, nil
-	case "worker":
+		return Command{Name: Serve}, nil
+	case Worker:
 		flags := flag.NewFlagSet("worker", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		once := flags.Bool("once", false, "process the queue and exit when it is empty")
@@ -35,8 +44,8 @@ func Parse(args []string, stderr io.Writer) (Command, error) {
 		if flags.NArg() != 0 {
 			return Command{}, usage(stderr)
 		}
-		return Command{Name: "worker", Once: *once}, nil
-	case "status":
+		return Command{Name: Worker, Once: *once}, nil
+	case Status:
 		flags := flag.NewFlagSet("status", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		watch := flags.Bool("watch", false, "refresh the view every second")
@@ -52,12 +61,12 @@ func Parse(args []string, stderr io.Writer) (Command, error) {
 		if *limit < 1 || *limit > 50 {
 			return Command{}, fmt.Errorf("limit must be between 1 and 50")
 		}
-		return Command{Name: "status", StatusJob: flags.Arg(0), Watch: *watch, Limit: *limit}, nil
-	case "index":
+		return Command{Name: Status, StatusJob: flags.Arg(0), Watch: *watch, Limit: *limit}, nil
+	case Index:
 		if len(args) != 2 {
 			return Command{}, usage(stderr)
 		}
-		return Command{Name: "index", IndexPath: args[1]}, nil
+		return Command{Name: Index, IndexPath: args[1]}, nil
 	default:
 		return Command{}, usage(stderr)
 	}
