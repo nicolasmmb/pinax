@@ -20,7 +20,7 @@ Plataformas suportadas:
 | macOS Apple Silicon (arm64) | `pinax-macos-arm64` |
 | Windows 10/11 x64 | `pinax-windows-x64.exe` |
 
-As releases ficam em [github.com/nicolasmmb/pinax/releases](https://github.com/nicolasmmb/pinax/releases). Elas são geradas pelo workflow **Build** no GitHub Actions: rode-o manualmente para baixar os artefatos ou envie uma tag `v*` para publicar uma release.
+As releases ficam em [github.com/nicolasmmb/pinax/releases](https://github.com/nicolasmmb/pinax/releases). Elas são geradas automaticamente pelo workflow **Build** a cada push na `main`: o workflow calcula a próxima versão, compila os binários, cria a tag e publica o release. Não é preciso criar tags manualmente.
 
 ### Linux x64 e macOS Apple Silicon
 
@@ -442,14 +442,26 @@ rm -f data/pinax.db data/pinax.db-wal data/pinax.db-shm
 
 O próximo worker recria o schema. Isso apaga os documentos indexados — reindexe em seguida.
 
+### Releases automáticas
+
+Todo push na `main` dispara o workflow **Build**, que:
+
+1. calcula a próxima versão — `v0.1.0` se ainda não houver tags; caso contrário, incrementa o patch da última tag (`v0.1.0` → `v0.1.1`);
+2. compila os binários de Linux x64, macOS arm64 e Windows x64 com a versão já injetada;
+3. cria a tag e publica o GitHub Release com os três artefatos.
+
+Não é preciso criar tags nem releases manualmente. Se um build falhar, nenhuma tag é criada e o próximo push tenta a mesma versão novamente. Reexecutar o workflow para o mesmo commit reaproveita a tag existente e apenas atualiza os assets.
+
+Para publicar uma versão específica, rode o workflow manualmente na `main` e preencha o campo `version` (ex.: `v0.2.0`). Em branches que não sejam a `main`, o workflow gera apenas os artefatos, sem publicar release.
+
 ### Versão do binário
 
 ```sh
 pinax --version
-# pinax v0.1.0 (commit abc123def456, built 2026-10-18T12:00:00Z) go1.25.0 linux/amd64
+# pinax v0.1.1 (commit abc123def456, built 2026-10-18T12:00:00Z) go1.25.0 linux/amd64
 ```
 
-O subcomando `pinax version` é equivalente. O workflow de build injeta a tag, o commit e a data via `-ldflags`. Builds locais sem essas flags usam a versão detectada pelo Go (por exemplo, uma pseudo-version com sufixo `+dirty`).
+O subcomando `pinax version` é equivalente. O workflow calcula a versão, injeta no binário junto com o commit e a data via `-ldflags`, e usa essa mesma versão como tag do release. Builds locais sem essas flags usam a versão detectada pelo Go (por exemplo, uma pseudo-version com sufixo `+dirty`).
 
 Para injetar a versão manualmente:
 
