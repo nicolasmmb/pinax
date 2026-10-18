@@ -71,7 +71,7 @@ pinax index <path>
 - Imprime `job=<id> status=<status> deduplicated=<bool> path=<resolvido>`.
 - Não abre o banco e não espera a indexação terminar.
 
-Requer worker em execução (`pinax worker` ou `pinax serve`).
+Requer `pinax worker` em execução. `pinax serve` inicia somente o servidor MCP e não processa a fila.
 
 ## Verificação
 

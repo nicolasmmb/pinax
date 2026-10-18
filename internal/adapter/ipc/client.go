@@ -19,6 +19,10 @@ type Client struct {
 	conn *rpc.Client
 }
 
+func NewClient(socketPath string) *Client {
+	return &Client{path: socketPath}
+}
+
 func Dial(socketPath string) (*Client, error) {
 	conn, err := rpc.Dial("unix", socketPath)
 	if err != nil {
@@ -66,7 +70,7 @@ func (c *Client) connection() (*rpc.Client, error) {
 	}
 	conn, err := rpc.Dial("unix", c.path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("worker offline: %w (start `pinax worker`)", err)
 	}
 	c.conn = conn
 	return conn, nil

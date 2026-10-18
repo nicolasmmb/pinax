@@ -29,7 +29,6 @@ type Config struct {
 
 	WorkerConcurrency int           `envx:"name=PINAX_WORKER_CONCURRENCY,default=4"`
 	EmbedBatchSize    int           `envx:"name=PINAX_EMBED_BATCH_SIZE,default=64"`
-	WorkerAutostart   bool          `envx:"name=PINAX_WORKER_AUTOSTART,default=true"`
 	WorkerHeartbeat   time.Duration `envx:"name=PINAX_WORKER_HEARTBEAT,default=5s"`
 	JobRetentionDays  int           `envx:"name=PINAX_JOB_RETENTION_DAYS,default=30"`
 	LogLevel          string        `envx:"name=PINAX_LOG_LEVEL,default=info"`

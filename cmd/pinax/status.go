@@ -1,51 +1,39 @@
-package cli
+package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"text/tabwriter"
 	"time"
 
 	"github.com/nicolasmmb/pinax/internal/adapter/ipc"
+	"github.com/nicolasmmb/pinax/internal/config"
 	"github.com/nicolasmmb/pinax/internal/domain"
 )
 
-func runStatus(ctx context.Context, deps statusDeps, args []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("status", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	var watch bool
-	flags.BoolVar(&watch, "watch", false, "refresh the view every second")
-	flags.BoolVar(&watch, "w", false, "shorthand for --watch")
-	limit := flags.Int("limit", 10, "number of recent jobs to show (1-50)")
-	flags.IntVar(limit, "n", 10, "shorthand for --limit")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() > 1 {
-		return usage(stderr)
-	}
-	if *limit < 1 || *limit > 50 {
-		return fmt.Errorf("limit must be between 1 and 50")
-	}
-	jobID := flags.Arg(0)
+type statusOptions struct {
+	jobID string
+	watch bool
+	limit int
+}
 
-	client, err := ipc.DialWithRetry(ctx, ipc.SocketPath(deps.Config.DatabasePath), 2*time.Second)
+func runStatus(ctx context.Context, cfg config.Config, opts statusOptions, stdout io.Writer) error {
+	client, err := ipc.DialWithRetry(ctx, ipc.SocketPath(cfg.DatabasePath), 2*time.Second)
 	if err != nil {
-		return fmt.Errorf("worker offline: %w (start `pinax worker` or `pinax serve`)", err)
+		return fmt.Errorf("worker offline: %w (start `pinax worker`)", err)
 	}
 	defer client.Close()
 
 	printOnce := func() error {
-		status, err := client.Status(ctx, jobID, *limit)
+		status, err := client.Status(ctx, opts.jobID, opts.limit)
 		if err != nil {
 			return err
 		}
 		renderStatus(stdout, status)
 		return nil
 	}
-	if !watch {
+	if !opts.watch {
 		return printOnce()
 	}
 	ticker := time.NewTicker(time.Second)
@@ -67,9 +55,7 @@ func renderStatus(w io.Writer, status domain.StatusResult) {
 	if status.Worker.WorkerID == "" {
 		fmt.Fprintln(w, "worker: offline")
 	} else {
-		fmt.Fprintf(w, "worker: online=%t stale=%t id=%s pid=%d heartbeat=%s\n",
-			status.Worker.Online, status.Worker.Stale, status.Worker.WorkerID,
-			status.Worker.PID, status.Worker.HeartbeatAt.Format(time.RFC3339))
+		fmt.Fprintf(w, "worker: online=%t stale=%t id=%s pid=%d heartbeat=%s\n", status.Worker.Online, status.Worker.Stale, status.Worker.WorkerID, status.Worker.PID, status.Worker.HeartbeatAt.Format(time.RFC3339))
 	}
 	if len(status.Jobs) == 0 {
 		fmt.Fprintln(w, "jobs: none")
@@ -79,10 +65,7 @@ func renderStatus(w io.Writer, status domain.StatusResult) {
 	table := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(table, "JOB\tSTATUS\tPROGRESS\tFILES\tCHUNKS\tPATH")
 	for _, job := range status.Jobs {
-		fmt.Fprintf(table, "%s\t%s\t%.0f%%\t%d/%d\t%d\t%s\n",
-			shortID(job.ID), job.Status, job.Progress.Percent,
-			job.Progress.FilesDone, job.Progress.FilesTotal,
-			job.Progress.Chunks, job.InputPath)
+		fmt.Fprintf(table, "%s\t%s\t%.0f%%\t%d/%d\t%d\t%s\n", shortID(job.ID), job.Status, job.Progress.Percent, job.Progress.FilesDone, job.Progress.FilesTotal, job.Progress.Chunks, job.InputPath)
 		for _, file := range job.ActiveFiles {
 			stage := string(file.Stage)
 			if stage == "" {
