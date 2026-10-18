@@ -1,5 +1,7 @@
 # Plano de implementação — Ingestão assíncrona com workers
 
+> **Nota de implementação (2026-10-18):** o Turso embutido mantém lock exclusivo do arquivo por processo. Por isso o worker é o único dono do banco e o `serve` acessa fila, status, cancelamento e busca por RPC em um Unix socket local (`internal/adapter/ipc`). A arquitetura de processos separados e jobs persistentes foi mantida; apenas o transporte entre `serve` e `worker` mudou de banco compartilhado para socket.
+
 ## Objetivo
 
 Paralelizar a ingestão de documentos, ter controle do que está sendo processado e ingerido, e garantir que o servidor MCP nunca fique bloqueado durante a indexação.
