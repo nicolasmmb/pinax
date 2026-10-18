@@ -17,17 +17,17 @@ mkdir -p bin documents data
 cp .example.env .env        # ajuste os caminhos absolutos dentro do arquivo
 # compile (veja as flags do PDF Oxide no passo 2)
 go build -o bin/pinax ./cmd/pinax
-bin/pinax serve             # sobe o servidor MCP e o worker automaticamente
+bin/pinax worker            # processa a fila de indexação
 ```
 
-Em outro terminal, dentro da pasta do projeto:
+Em outro terminal, enfileire documentos e acompanhe o progresso:
 
 ```sh
 bin/pinax index documents   # enfileira a pasta
 bin/pinax status --watch    # acompanha em tempo real
 ```
 
-Pronto. As ferramentas `index_path`, `ingest_status`, `ingest_cancel` e `search_documents` já estão disponíveis para o cliente MCP.
+Configure o cliente MCP para executar `bin/pinax serve` quando precisar das ferramentas. O `serve` é iniciado pelo cliente MCP, separado do worker.
 
 ---
 
@@ -140,7 +140,6 @@ Referência completa das variáveis:
 | `EMBED_MODEL` | `embeddinggemma-2:740m` (Ollama) | Obrigatório para OpenAI. |
 | `PINAX_WORKER_CONCURRENCY` | `4` | Arquivos em paralelo e limite de jobs ativos. |
 | `PINAX_EMBED_BATCH_SIZE` | `64` | Chunks por chamada de embedding. |
-| `PINAX_WORKER_AUTOSTART` | `true` | `serve` inicia e supervisiona o worker. |
 | `PINAX_WORKER_HEARTBEAT` | `5s` | Intervalo de heartbeat de worker e jobs. |
 | `PINAX_JOB_RETENTION_DAYS` | `30` | Retenção de jobs terminados; `0` desliga. |
 | `PINAX_LOG_LEVEL` | `info` | `debug`, `info`, `warn` ou `error`. |
@@ -153,14 +152,7 @@ Referência completa das variáveis:
 bin/pinax serve
 ```
 
-O `serve` fala MCP por `stdio` e, com `PINAX_WORKER_AUTOSTART=true` (padrão), inicia e supervisiona o worker. Ele **não abre o banco**: enfileira, consulta e busca pelo Unix socket do worker.
-
-Se preferir controlar o worker manualmente:
-
-```sh
-# .env
-PINAX_WORKER_AUTOSTART=false
-```
+O `serve` fala MCP por `stdio` e inicia somente o servidor MCP. Ele não abre o banco nem inicia o worker. As ferramentas que enfileiram jobs, consultam status ou fazem buscas precisam do worker ativo pelo socket.
 
 ```sh
 bin/pinax worker    # terminal 1
@@ -175,7 +167,7 @@ bin/pinax worker --once
 
 ### Registrar no cliente MCP
 
-Registre **somente** o `serve`. O worker é consequência dele.
+Registre o `serve` no cliente MCP e mantenha `bin/pinax worker` rodando separadamente.
 
 ```json
 {
@@ -237,7 +229,7 @@ Comportamento:
 bin/pinax status                    # jobs recentes
 bin/pinax status <job_id>           # detalhe de um job
 bin/pinax status --watch            # atualiza a cada segundo
-bin/pinax status <job_id> --watch   # detalhe ao vivo (ou -w)
+bin/pinax status --watch <job_id>   # detalhe ao vivo (ou -w)
 ```
 
 `Ctrl+C` encerra o watch. O comando consulta o worker pelo socket e mostra worker, progresso, arquivos ativos, estágio atual e falhas.
@@ -305,7 +297,7 @@ bin/pinax status --watch
 ### Cliente MCP (OpenCode, Claude Desktop, etc.)
 
 1. Registre apenas `bin/pinax serve` com os caminhos absolutos no `env`.
-2. Mantenha `PINAX_WORKER_AUTOSTART=true`.
+2. Inicie `bin/pinax worker` como processo separado.
 3. Use `index_path`, `ingest_status`, `ingest_cancel` e `search_documents` pelas ferramentas.
 
 ### Cron ou script
@@ -326,8 +318,8 @@ Enfileire antes com `bin/pinax index` ou mantenha um `serve`/`worker` contínuo 
 
 | Sintoma | Causa provável | Solução |
 | --- | --- | --- |
-| `worker offline` em `status` ou `index` | Nenhum worker no socket. | Suba `bin/pinax worker` ou deixe o `serve` com autostart. |
-| `connect to ingest worker` no `serve` | Autostart desligado e worker ausente. | Inicie o worker ou volte `PINAX_WORKER_AUTOSTART=true`. |
+| `worker offline` em `status` ou `index` | Nenhum worker no socket. | Suba `bin/pinax worker`. |
+| Ferramenta MCP informa worker offline | O MCP está ativo, mas o worker não está. | Suba `bin/pinax worker`. |
 | Segundo worker falha ao iniciar | O banco já tem dono. | Use o worker existente; não abra dois sobre o mesmo banco. |
 | `Undefined symbols ... _document_editor_*` no build | `CGO_LDFLAGS` ausente ou sem o `.a`. | Exporte as flags do Passo 2 e recompile. |
 | Arquivo fica `pending_ocr` | PDF sem texto selecionável. | Use um PDF com texto; OCR não está incluído. |
@@ -360,12 +352,12 @@ Monólito modular. `internal/domain` define os dados compartilhados; `internal/a
 ```text
 cmd/pinax
   └── adapter/cli
-        ├── serve ──> adapter/mcp ──> app/jobs ──┐
-        │                             app/query ──┼──> adapter/ipc (cliente) ── Unix socket
-        │                             embedder ───┘
-        └── worker (autostart) ──> adapter/ipc (servidor) ──> app/jobs ──> app/ingest ──> Turso
-                                                                          └── extratores
-                                                 embedding provider ────────────┘
+        └── parsing ──> comandos em cmd/pinax
+                         ├── serve ──> adapter/mcp ──> app/jobs/app/query ──> adapter/ipc (cliente)
+                         ├── index/status ────────────────────────────────> adapter/ipc (cliente)
+                         └── worker ──> adapter/ipc (servidor) ──> app/jobs ──> app/ingest ──> Turso
+                                                                                           └── extratores
+                                                              embedding provider ────────────┘
 ```
 
 O adapter Turso guarda vetores como `vector32` e ordena por `vector_distance_cos`.
@@ -426,7 +418,7 @@ Guia detalhado, com mais exemplos e variações: [docs/uso.md](docs/uso.md).
 - [ ] Ollama no ar com o modelo de embeddings baixado
 - [ ] `bin/pinax` compilado com as flags do PDF Oxide
 - [ ] `.env` com `PINAX_DOCUMENT_ROOT` e `PINAX_DATABASE_PATH` absolutos
-- [ ] `bin/pinax serve` (ou `worker` + `serve`) rodando
+- [ ] `bin/pinax worker` e `bin/pinax serve` rodando separadamente
 - [ ] `bin/pinax index documents` enfileirou
 - [ ] `bin/pinax status --watch` mostra `completed`
 - [ ] `search_documents` retorna trechos
