@@ -1,5 +1,7 @@
 # Plano de implementação — Ingestão assíncrona com workers
 
+> **Documento histórico.** Este arquivo registra o plano original (E0–E7). O estado atual da implementação está em [`plans/simplificacao-workers.md`](simplificacao-workers.md). Onde este documento citar lease, `worker_leases`, `planning_done`/`planned_at`, `PINAX_INGEST_WORKERS` ou `PINAX_WORKER_JOB_SLOTS`, vale a nota de simplificação abaixo.
+
 > **Nota de implementação (2026-10-18):** o Turso embutido mantém lock exclusivo do arquivo por processo. Por isso o worker é o único dono do banco e o `serve` acessa fila, status, cancelamento e busca por RPC em um Unix socket local (`internal/adapter/ipc`). A arquitetura de processos separados e jobs persistentes foi mantida; apenas o transporte entre `serve` e `worker` mudou de banco compartilhado para socket.
 >
 > **Nota de simplificação (2026-10-18):** o lease foi removido. A exclusividade de worker vem do socket derivado do banco (`ipc.Listen` falha se outro worker responde) e do lock do Turso. O status usa uma linha de heartbeat em `worker_heartbeat`, sem lógica de posse. `PINAX_INGEST_WORKERS` e `PINAX_WORKER_JOB_SLOTS` foram substituídos por `PINAX_WORKER_CONCURRENCY`. O worker agora tem um único dono do estado dos jobs, planeja diretórios fora do loop do scheduler e não usa `planning_done`/`ResetPlanning`.

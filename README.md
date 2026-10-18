@@ -145,6 +145,17 @@ Estados por arquivo: `queued`, `running`, `indexed`, `skipped`, `pending_ocr`, `
 
 Falhas em um arquivo não interrompem o job: o job termina como `completed_with_errors` e o erro aparece em `ingest_status`. A ingestão escreve no banco em transações curtas, com WAL e `busy_timeout`, então `search_documents` continua respondendo durante o processamento.
 
+### Como o worker executa
+
+- Um único scheduler é dono do estado dos jobs. Não há mutex nem goroutine de alimentação por job.
+- `PINAX_WORKER_CONCURRENCY` define os arquivos em paralelo e o limite de jobs ativos.
+- O planejamento do diretório roda fora do scheduler, em goroutine própria; uma pasta grande não bloqueia cancelamento nem finalização.
+- A fila usa rodízio entre jobs. Com mais de um job ativo, cada job usa no máximo `ceil(concorrência/2)` runners; com um job só, ele pode usar todos.
+- O cancelamento é consultado a cada segundo. Arquivos na fila viram `canceled` na hora; arquivos em execução param no próximo checkpoint de embedding.
+- O heartbeat renova o registro do worker e o heartbeat de todos os jobs ativos em uma única atualização por intervalo.
+- Em shutdown normal, arquivos em execução e jobs ativos voltam para `queued`. Após queda abrupta, o próximo worker recupera jobs sem heartbeat dentro de `max(6 × PINAX_WORKER_HEARTBEAT, 30s)`.
+
+
 ## Reset do banco
 
 Não há migração de schema. Pare o `serve`/`worker` e recrie o banco durante o desenvolvimento:
