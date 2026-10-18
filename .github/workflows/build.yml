@@ -1,0 +1,200 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOFLAGS: -mod=readonly
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-22.04
+            output: pinax-linux-x64
+          - name: macos-arm64
+            os: macos-15
+            output: pinax-macos-arm64
+          - name: windows-x64
+            os: windows-latest
+            output: pinax-windows-x64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify target architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "runner: $(uname -s) $(uname -m)"
+          case "${{ matrix.name }}" in
+            linux-x64)
+              [ "$(uname -m)" = "x86_64" ] || { echo "esperado x86_64"; exit 1; }
+              ;;
+            macos-arm64)
+              [ "$(uname -m)" = "arm64" ] || { echo "esperado arm64"; exit 1; }
+              ;;
+            windows-x64)
+              [ "$(uname -m)" = "x86_64" ] || { echo "esperado x86_64"; exit 1; }
+              ;;
+          esac
+
+      - name: Verify C toolchain
+        if: runner.os == 'Windows'
+        shell: bash
+        run: gcc --version
+
+      - name: Install pdf_oxide native library
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/pdf_oxide/go)"
+          VERSION="${VERSION#v}"
+
+          # Keep the native library inside the workspace so CGO paths are
+          # deterministic on every runner. On Windows, Git Bash understands
+          # POSIX paths but GCC needs a Windows-style path with forward slashes.
+          if command -v cygpath >/dev/null 2>&1; then
+            PDF_OXIDE_DIR="$(cygpath -m "${GITHUB_WORKSPACE}/.pdf_oxide")"
+          else
+            PDF_OXIDE_DIR="${GITHUB_WORKSPACE}/.pdf_oxide"
+          fi
+
+          go run "github.com/yfedoseev/pdf_oxide/go/cmd/install@v${VERSION}" \
+            -version "${VERSION}" \
+            -dir "${PDF_OXIDE_DIR}"
+
+          echo "PDF_OXIDE_DIR=${PDF_OXIDE_DIR}" >> "${GITHUB_ENV}"
+
+      - name: Configure CGO
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${RUNNER_OS}" in
+            Linux)
+              LIB_DIR=linux_amd64
+              SYSTEM_LIBS="-lm -lpthread -ldl -lrt -lgcc_s -lutil -lc"
+              ;;
+            macOS)
+              LIB_DIR=darwin_arm64
+              SYSTEM_LIBS="-framework CoreFoundation -framework Security -framework SystemConfiguration -liconv -lresolv"
+              ;;
+            Windows)
+              LIB_DIR=windows_amd64
+              SYSTEM_LIBS="-lws2_32 -luserenv -lbcrypt -ladvapi32 -lcrypt32 -lsynchronization -lntdll -lkernel32 -lntoskrnl -lole32 -lshell32"
+              ;;
+            *)
+              echo "runner não suportado: ${RUNNER_OS}"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "CGO_ENABLED=1"
+            echo "CGO_CFLAGS=-I${PDF_OXIDE_DIR}/include"
+            echo "CGO_LDFLAGS=${PDF_OXIDE_DIR}/lib/${LIB_DIR}/libpdf_oxide.a ${SYSTEM_LIBS}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${GITHUB_REF}" in
+            refs/tags/*)
+              BUILD_VERSION="${GITHUB_REF_NAME}"
+              ;;
+            *)
+              BUILD_VERSION="dev-$(git rev-parse --short HEAD)"
+              ;;
+          esac
+          BUILD_COMMIT="$(git rev-parse --short=12 HEAD)"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${BUILD_VERSION} -X main.commit=${BUILD_COMMIT} -X main.buildDate=${BUILD_DATE}" \
+            -o "dist/${{ matrix.output }}" ./cmd/pinax
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          output="dist/${{ matrix.output }}"
+          set +e
+          message="$("./${output}" 2>&1)"
+          status=$?
+          set -e
+
+          echo "${message}"
+          if [ "${status}" -eq 0 ]; then
+            echo "esperado código de saída != 0 sem argumentos"
+            exit 1
+          fi
+          echo "${message}" | grep -q "usage: pinax"
+
+          version_output="$("./${output}" --version)"
+          echo "${version_output}"
+          case "${GITHUB_REF}" in
+            refs/tags/*)
+              expected="${GITHUB_REF_NAME}"
+              ;;
+            *)
+              expected="dev-"
+              ;;
+          esac
+          echo "${version_output}" | grep -q "pinax ${expected}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pinax-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/pinax-linux-x64
+            dist/pinax-macos-arm64
+            dist/pinax-windows-x64.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: true

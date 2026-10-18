@@ -23,6 +23,10 @@ func Main() int {
 	if err != nil {
 		return reportError(os.Stderr, err)
 	}
+	if cmd.Name == cli.Version {
+		fmt.Fprintln(os.Stdout, versionString())
+		return 0
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return reportError(os.Stderr, err)
@@ -58,6 +62,8 @@ func Main() int {
 		if err != nil {
 			return reportError(os.Stderr, err)
 		}
+	case cli.Version:
+		fmt.Fprintln(os.Stdout, versionString())
 	default:
 		return reportError(os.Stderr, fmt.Errorf("unknown command %q", cmd.Name))
 	}
