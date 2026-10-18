@@ -8,7 +8,62 @@ O nome vem do grego *pinax* (tábua de registro, índice).
 
 ---
 
+## Instalação rápida (binário pronto)
+
+Baixe e instale o binário para a sua plataforma. Ele é **autossuficiente**: já inclui a biblioteca do PDF Oxide (linkada estaticamente) e o Turso embutido, então **não é preciso ter Go nem configurar as flags CGo** para executar.
+
+Plataformas suportadas:
+
+| Plataforma | Arquivo da release |
+| --- | --- |
+| Linux x64 | `pinax-linux-x64` |
+| macOS Apple Silicon (arm64) | `pinax-macos-arm64` |
+| Windows 10/11 x64 | `pinax-windows-x64.exe` |
+
+As releases ficam em [github.com/nicolasmmb/pinax/releases](https://github.com/nicolasmmb/pinax/releases). Elas são geradas pelo workflow **Build** no GitHub Actions: rode-o manualmente para baixar os artefatos ou envie uma tag `v*` para publicar uma release.
+
+### Linux x64 e macOS Apple Silicon
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nicolasmmb/pinax/main/scripts/install.sh | sh
+```
+
+O instalador coloca o binário em `~/.local/bin/pinax`. Para usar outro diretório ou fixar uma versão:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nicolasmmb/pinax/main/scripts/install.sh \
+  | PINAX_INSTALL_DIR="$HOME/bin" PINAX_VERSION=v0.1.0 sh
+```
+
+Se `~/.local/bin` não estiver no `PATH`, o script mostra a linha que você precisa adicionar ao seu shell.
+
+### Windows x64 (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/nicolasmmb/pinax/main/scripts/install.ps1 | iex
+```
+
+O instalador coloca `pinax.exe` em `%LOCALAPPDATA%\Programs\pinax` e adiciona essa pasta ao `PATH` do usuário. **Abra um novo terminal** depois da instalação.
+
+Para escolher diretório/versão, baixe o script e passe os parâmetros:
+
+```powershell
+irm https://raw.githubusercontent.com/nicolasmmb/pinax/main/scripts/install.ps1 -OutFile install.ps1
+.\install.ps1 -Version v0.1.0 -InstallDir C:\Tools\pinax
+```
+
+### Depois de instalar
+
+1. Confirme a versão instalada: `pinax --version`.
+2. Crie a pasta de documentos e o `.env` com seus caminhos (veja o [Passo 3](#passo-3--configurar)).
+3. Inicie o worker: `pinax worker`.
+4. Configure o cliente MCP para executar `pinax serve` (veja [Registrar no cliente MCP](#registrar-no-cliente-mcp)).
+
+---
+
 ## Em 30 segundos
+
+> Precisa compilar do código-fonte? Se você instalou pelo binário, pule para o [Passo 3](#passo-3--configurar).
 
 ```sh
 git clone https://github.com/nicolasmmb/pinax
@@ -57,6 +112,8 @@ ollama serve
 ---
 
 ## Passo 2 — Compilar
+
+> Este passo é só para desenvolvimento ou para quem quer compilar do código. Se você instalou o [binário pronto](#instalação-rápida-binário-pronto), pule para o Passo 3.
 
 O build usa CGo e a biblioteca estática do PDF Oxide. Sem as flags corretas o linker falha com `Undefined symbols ... _document_editor_*`.
 
@@ -318,6 +375,8 @@ Enfileire com `bin/pinax index` e mantenha `bin/pinax worker` rodando para proce
 
 | Sintoma | Causa provável | Solução |
 | --- | --- | --- |
+| `pinax: command not found` após instalar | Diretório de instalação fora do `PATH`. | Adicione `~/.local/bin` (Linux/macOS) ou reabra o terminal (Windows). |
+| Instalador informa plataforma não suportada | Não há build para Linux arm64 ou macOS Intel. | Compile do código-fonte ou use uma máquina/VM suportada. |
 | `worker offline` em `status` ou `index` | Nenhum worker no socket. | Suba `bin/pinax worker`. |
 | Ferramenta MCP informa worker offline | O MCP está ativo, mas o worker não está. | Suba `bin/pinax worker`. |
 | Segundo worker falha ao iniciar | O banco já tem dono. | Use o worker existente; não abra dois sobre o mesmo banco. |
@@ -382,6 +441,24 @@ rm -f data/pinax.db data/pinax.db-wal data/pinax.db-shm
 ```
 
 O próximo worker recria o schema. Isso apaga os documentos indexados — reindexe em seguida.
+
+### Versão do binário
+
+```sh
+pinax --version
+# pinax v0.1.0 (commit abc123def456, built 2026-10-18T12:00:00Z) go1.25.0 linux/amd64
+```
+
+O subcomando `pinax version` é equivalente. O workflow de build injeta a tag, o commit e a data via `-ldflags`. Builds locais sem essas flags usam a versão detectada pelo Go (por exemplo, uma pseudo-version com sufixo `+dirty`).
+
+Para injetar a versão manualmente:
+
+```sh
+go build -ldflags "-X main.version=v0.1.0 \
+  -X main.commit=$(git rev-parse --short=12 HEAD) \
+  -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -o bin/pinax ./cmd/pinax
+```
 
 ### Testes
 

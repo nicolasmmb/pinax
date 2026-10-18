@@ -9,10 +9,11 @@ import (
 type Name string
 
 const (
-	Serve  Name = "serve"
-	Worker Name = "worker"
-	Status Name = "status"
-	Index  Name = "index"
+	Serve   Name = "serve"
+	Worker  Name = "worker"
+	Status  Name = "status"
+	Index   Name = "index"
+	Version Name = "version"
 )
 
 type Command struct {
@@ -29,6 +30,11 @@ func Parse(args []string, stderr io.Writer) (Command, error) {
 		return Command{}, usage(stderr)
 	}
 	switch Name(args[0]) {
+	case "--version", "-version", "version":
+		if len(args) != 1 {
+			return Command{}, usage(stderr)
+		}
+		return Command{Name: Version}, nil
 	case Serve:
 		if len(args) != 1 {
 			return Command{}, usage(stderr)
@@ -73,6 +79,6 @@ func Parse(args []string, stderr io.Writer) (Command, error) {
 }
 
 func usage(stderr io.Writer) error {
-	fmt.Fprintln(stderr, "usage: pinax serve | pinax worker [--once] | pinax status [--watch] [--limit N] [job_id] | pinax index <path>")
+	fmt.Fprintln(stderr, "usage: pinax serve | pinax worker [--once] | pinax status [--watch] [--limit N] [job_id] | pinax index <path> | pinax --version")
 	return fmt.Errorf("invalid command")
 }
