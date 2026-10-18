@@ -5,15 +5,15 @@
       "pinax": {
         "type": "local",
         "command": ["go", "run", "./cmd/pinax", "serve"],
-        "cwd": "/Users/nicolas.mmb/Downloads/RAGGER",
+        "cwd": "/Users/nicolas.mmb/Downloads/pinax",
         "disabled": false,
         "timeout": {
           "catalog": 60000,
           "execution": 600000
         },
         "environment": {
-          "PINAX_DOCUMENT_ROOT": "/Users/nicolas.mmb/Downloads/RAGGER/documents",
-          "PINAX_DATABASE_PATH": "/Users/nicolas.mmb/Downloads/RAGGER/data/pinax.db",
+          "PINAX_DOCUMENT_ROOT": "/Users/nicolas.mmb/Downloads/pinax/documents",
+          "PINAX_DATABASE_PATH": "/Users/nicolas.mmb/Downloads/pinax/data/pinax.db",
           "EMBED_URL": "http://homelab:12240/",
           "EMBED_MODEL": "embeddinggemma-2:740m",
           "CGO_CFLAGS": "-I/Users/nicolas.mmb/Library/Caches/pdf_oxide/v0.3.78/include",
