@@ -123,6 +123,51 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 CREATE INDEX IF NOT EXISTS chunks_document_path ON chunks(document_path);
 CREATE INDEX IF NOT EXISTS chunks_content_hash ON chunks(content_hash);
+
+CREATE TABLE IF NOT EXISTS ingest_jobs (
+  id TEXT PRIMARY KEY,
+  input_path TEXT NOT NULL,
+  input_kind TEXT NOT NULL CHECK (input_kind IN ('file','dir')),
+  status TEXT NOT NULL CHECK (status IN ('queued','running','completed','completed_with_errors','canceled','failed')),
+  cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
+  embedding_model TEXT NOT NULL,
+  chunker_version TEXT NOT NULL,
+  chunk_size INTEGER NOT NULL,
+  chunk_overlap INTEGER NOT NULL,
+  planning_done INTEGER NOT NULL DEFAULT 0 CHECK (planning_done IN (0,1)),
+  planned_at TEXT,
+  worker_id TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  heartbeat_at TEXT
+);
+CREATE TABLE IF NOT EXISTS ingest_job_files (
+  job_id TEXT NOT NULL REFERENCES ingest_jobs(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('queued','running','indexed','skipped','pending_ocr','failed','canceled')),
+  stage TEXT CHECK (stage IS NULL OR stage IN ('hashing','extracting','chunking','embedding','saving')),
+  chunks INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  PRIMARY KEY (job_id, path)
+);
+CREATE TABLE IF NOT EXISTS worker_leases (
+  name TEXT PRIMARY KEY,
+  worker_id TEXT NOT NULL,
+  pid INTEGER NOT NULL,
+  hostname TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ingest_jobs_status_created ON ingest_jobs(status, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ingest_jobs_active_input ON ingest_jobs(input_path) WHERE status IN ('queued','running');
+CREATE INDEX IF NOT EXISTS ingest_job_files_job_status ON ingest_job_files(job_id, status);
+CREATE INDEX IF NOT EXISTS ingest_job_files_job_stage ON ingest_job_files(job_id, stage) WHERE status = 'running';
+CREATE INDEX IF NOT EXISTS ingest_jobs_finished ON ingest_jobs(finished_at) WHERE finished_at IS NOT NULL;
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("create Turso schema: %w", err)
